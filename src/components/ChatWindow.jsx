@@ -3,30 +3,49 @@ import {
   collection, query, orderBy, onSnapshot,
   addDoc, serverTimestamp, doc, updateDoc, setDoc, getDoc, writeBatch,
 } from 'firebase/firestore'
-import { db } from '../firebase'
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage'
+import { db, storage } from '../firebase'
 import Message from './Message'
 
-export default function ChatWindow({ chat, currentUser }) {
-  const [messages, setMessages] = useState([])
-  const [text, setText] = useState('')
+export default function ChatWindow({ chat, currentUser, onBack }) {
+  const [messages, setMessages]       = useState([])
+  const [text, setText]               = useState('')
   const [contactName, setContactName] = useState('')
   const [editingName, setEditingName] = useState(false)
-  const [tempName, setTempName] = useState('')
-  const [deletedIds, setDeletedIds] = useState(() => {
+  const [tempName, setTempName]       = useState('')
+  const [otherPhoto, setOtherPhoto]   = useState(null)
+  const [myPhoto, setMyPhoto]         = useState(null)
+  const [uploading, setUploading]     = useState(false)
+  const [recording, setRecording]     = useState(false)
+  const [recTime, setRecTime]         = useState(0)
+  const [deletedIds, setDeletedIds]   = useState(() => {
     const s = localStorage.getItem(`del_${currentUser.uid}_${chat.id}`)
     return s ? JSON.parse(s) : []
   })
-  const bottomRef = useRef(null)
 
-  // Load saved contact name
+  const bottomRef    = useRef(null)
+  const fileInputRef = useRef(null)
+  const mediaRecRef  = useRef(null)
+  const timerRef     = useRef(null)
+  const chunksRef    = useRef([])
+
+  // Load contact name and photos
   useEffect(() => {
     const names = JSON.parse(localStorage.getItem(`contactNames_${currentUser.uid}`) || '{}')
     const name = names[chat.otherId] || chat.otherPhone
     setContactName(name)
     setTempName(name)
+
+    // Load photos
+    getDoc(doc(db, 'users', chat.otherId)).then(snap => {
+      if (snap.exists()) setOtherPhoto(snap.data().photoURL || null)
+    })
+    getDoc(doc(db, 'users', currentUser.uid)).then(snap => {
+      if (snap.exists()) setMyPhoto(snap.data().photoURL || null)
+    })
   }, [chat.otherId, chat.otherPhone, currentUser.uid])
 
-  // Tell Firestore this user has this chat open
+  // Mark this chat as open in the status doc
   useEffect(() => {
     setDoc(doc(db, 'status', currentUser.uid), {
       online: true,
@@ -34,7 +53,6 @@ export default function ChatWindow({ chat, currentUser }) {
       lastSeen: serverTimestamp(),
     })
     return () => {
-      // Chat closed — clear activeChat
       setDoc(doc(db, 'status', currentUser.uid), {
         online: true,
         activeChat: null,
@@ -43,21 +61,15 @@ export default function ChatWindow({ chat, currentUser }) {
     }
   }, [chat.id, currentUser.uid])
 
-  // Real-time messages + auto-mark as read
+  // Real-time messages + mark as read
   useEffect(() => {
-    const q = query(
-      collection(db, 'chats', chat.id, 'messages'),
-      orderBy('timestamp', 'asc')
-    )
+    const q = query(collection(db, 'chats', chat.id, 'messages'), orderBy('timestamp', 'asc'))
     const unsub = onSnapshot(q, async snap => {
       setMessages(snap.docs.map(d => ({ id: d.id, ...d.data() })))
-
-      // Mark messages sent by the OTHER person as "read"
       const batch = writeBatch(db)
       let hasWork = false
       snap.docs.forEach(d => {
-        const data = d.data()
-        if (data.senderId !== currentUser.uid && data.status !== 'read') {
+        if (d.data().senderId !== currentUser.uid && d.data().status !== 'read') {
           batch.update(doc(db, 'chats', chat.id, 'messages', d.id), { status: 'read' })
           hasWork = true
         }
@@ -67,60 +79,163 @@ export default function ChatWindow({ chat, currentUser }) {
     return unsub
   }, [chat.id, currentUser.uid])
 
-  // Auto-scroll to bottom on new messages
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
+  // Profile picture upload
+  const handleProfilePicChange = async e => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setUploading(true)
+    try {
+      const fileRef = ref(storage, `profilePictures/${currentUser.uid}`)
+      await uploadBytes(fileRef, file)
+      const url = await getDownloadURL(fileRef)
+      await updateDoc(doc(db, 'users', currentUser.uid), { photoURL: url })
+      setMyPhoto(url)
+    } catch (err) {
+      alert('Upload failed: ' + err.message)
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  // Send text message
   const sendMessage = async () => {
     if (!text.trim()) return
     const trimmed = text.trim()
     setText('')
-
-    // Create the message with status "sent"
     const msgRef = await addDoc(collection(db, 'chats', chat.id, 'messages'), {
       senderId: currentUser.uid,
+      type: 'text',
       text: trimmed,
       timestamp: serverTimestamp(),
       status: 'sent',
     })
-
-    // Update chat's lastMessage (shown in sidebar preview)
     await updateDoc(doc(db, 'chats', chat.id), {
-      lastMessage: {
-        text: trimmed,
-        timestamp: serverTimestamp(),
-        senderId: currentUser.uid,
-      },
+      lastMessage: { text: trimmed, type: 'text', timestamp: serverTimestamp(), senderId: currentUser.uid },
     })
+    upgradeStatus(msgRef.id)
+  }
 
-    // Check if recipient is currently online or has this chat open
+  const upgradeStatus = async msgId => {
     try {
       const statusSnap = await getDoc(doc(db, 'status', chat.otherId))
       if (statusSnap.exists()) {
         const s = statusSnap.data()
-        if (s.online && s.activeChat === chat.id) {
-          // Recipient has this chat open — their onSnapshot will mark as "read"
-          // We don't need to do anything extra
-        } else if (s.online) {
-          // Recipient is online but not in this chat → "delivered"
-          await updateDoc(
-            doc(db, 'chats', chat.id, 'messages', msgRef.id),
-            { status: 'delivered' }
-          )
+        if (s.online && s.activeChat !== chat.id) {
+          await updateDoc(doc(db, 'chats', chat.id, 'messages', msgId), { status: 'delivered' })
         }
-        // If offline: stays "sent" until they log in (markDelivered in ChatApp)
       }
+    } catch { /* non-critical */ }
+  }
+
+  // Send file (image or document)
+  const handleFileChange = async e => {
+  const file = e.target.files?.[0]
+  if (!file) return
+  e.target.value = ''
+
+  const isImage = file.type.startsWith('image/')
+  const type = isImage ? 'image' : 'document'
+
+  setUploading(true)
+  try {
+    const storageRef = ref(storage, `chatFiles/${chat.id}/${Date.now()}_${file.name}`)
+    console.log('Uploading to:', storageRef.fullPath)
+
+    const snapshot = await uploadBytes(storageRef, file)
+    console.log('Upload done, getting URL...')
+
+    const url = await getDownloadURL(snapshot.ref)
+    console.log('URL:', url)
+
+    if (!url) throw new Error('Download URL came back empty')
+
+    const msgRef = await addDoc(collection(db, 'chats', chat.id, 'messages'), {
+      senderId: currentUser.uid,
+      type,
+      url,
+      fileName: file.name,
+      fileSize: file.size,
+      timestamp: serverTimestamp(),
+      status: 'sent',
+    })
+    await updateDoc(doc(db, 'chats', chat.id), {
+      lastMessage: { type, timestamp: serverTimestamp(), senderId: currentUser.uid },
+    })
+    upgradeStatus(msgRef.id)
+  } catch (err) {
+    console.error('File upload error:', err)
+    alert('Upload failed: ' + err.message)
+  } finally {
+    setUploading(false)
+  }
+}
+
+  // Voice recording
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const mr = new MediaRecorder(stream)
+      chunksRef.current = []
+      mr.ondataavailable = e => chunksRef.current.push(e.data)
+      mr.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop())
+        const blob = new Blob(chunksRef.current, { type: 'audio/webm' })
+        await uploadVoice(blob, recTime)
+        setRecTime(0)
+      }
+      mr.start()
+      mediaRecRef.current = mr
+      setRecording(true)
+      timerRef.current = setInterval(() => setRecTime(t => t + 1), 1000)
     } catch {
-      // Non-critical
+      alert('Microphone permission denied.')
     }
   }
 
-  const handleKeyDown = e => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      sendMessage()
+  const stopRecording = () => {
+    if (mediaRecRef.current) {
+      mediaRecRef.current.stop()
+      mediaRecRef.current = null
+      clearInterval(timerRef.current)
+      setRecording(false)
     }
+  }
+
+  const uploadVoice = async (blob, duration) => {
+  setUploading(true)
+  try {
+    const storageRef = ref(storage, `chatFiles/${chat.id}/${Date.now()}_voice.webm`)
+    const snapshot = await uploadBytes(storageRef, blob)
+    const url = await getDownloadURL(snapshot.ref)
+
+    if (!url) throw new Error('Download URL came back empty')
+
+    const msgRef = await addDoc(collection(db, 'chats', chat.id, 'messages'), {
+      senderId: currentUser.uid,
+      type: 'voice',
+      url,
+      duration,
+      timestamp: serverTimestamp(),
+      status: 'sent',
+    })
+    await updateDoc(doc(db, 'chats', chat.id), {
+      lastMessage: { type: 'voice', timestamp: serverTimestamp(), senderId: currentUser.uid },
+    })
+    upgradeStatus(msgRef.id)
+  } catch (err) {
+    console.error('Voice upload error:', err)
+    alert('Voice upload failed: ' + err.message)
+  } finally {
+    setUploading(false)
+  }
+}
+
+  const handleKeyDown = e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() }
   }
 
   const deleteMessage = msgId => {
@@ -138,14 +253,27 @@ export default function ChatWindow({ chat, currentUser }) {
   }
 
   const visibleMessages = messages.filter(m => !deletedIds.includes(m.id))
+  const fmtRec = s => `${Math.floor(s/60).toString().padStart(2,'0')}:${(s%60).toString().padStart(2,'0')}`
+
+  // hidden profile pic input ref
+  const picInputRef = useRef(null)
 
   return (
     <div className="chat-window">
       {/* Header */}
       <div className="chat-header">
-        <div className="avatar">
-          <span>{contactName[0]?.toUpperCase()}</span>
+        <button className="icon-btn chat-header-back" onClick={onBack} title="Back">
+          <svg viewBox="0 0 24 24" fill="currentColor" width="22" height="22">
+            <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z" />
+          </svg>
+        </button>
+
+        <div className="avatar" onClick={() => {}} title="Their profile">
+          {otherPhoto
+            ? <img src={otherPhoto} alt="" />
+            : <span>{contactName[0]?.toUpperCase()}</span>}
         </div>
+
         <div className="chat-header-info">
           {editingName ? (
             <div className="name-edit-row">
@@ -166,8 +294,8 @@ export default function ChatWindow({ chat, currentUser }) {
               title="Click to rename"
             >
               {contactName}
-              <svg viewBox="0 0 24 24" fill="currentColor" width="13" height="13" style={{ marginLeft: 5, opacity: 0.5 }}>
-                <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a1 1 0 00-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" />
+              <svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12" opacity="0.4">
+                <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 000-1.41l-2.34-2.34a1 1 0 00-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" />
               </svg>
             </div>
           )}
@@ -176,7 +304,8 @@ export default function ChatWindow({ chat, currentUser }) {
       </div>
 
       {/* Messages */}
-      <div className="messages-area">
+      <div className="messages-area" style={{ position: 'relative' }}>
+        {uploading && <div className="uploading-bar">⬆ Uploading…</div>}
         {visibleMessages.length === 0 && (
           <div className="no-messages">Say hello! 👋</div>
         )}
@@ -193,23 +322,55 @@ export default function ChatWindow({ chat, currentUser }) {
 
       {/* Input bar */}
       <div className="input-bar">
-        <textarea
-          className="msg-input"
-          value={text}
-          onChange={e => setText(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Type a message"
-          rows={1}
-        />
-        <button
-          className="send-btn"
-          onClick={sendMessage}
-          disabled={!text.trim()}
-        >
-          <svg viewBox="0 0 24 24" fill="currentColor" width="22" height="22">
-            <path d="M1.101 21.757L23.8 12.028 1.101 2.3l.011 7.912 13.623 1.816-13.623 1.817-.011 7.912z" />
-          </svg>
-        </button>
+        {recording ? (
+          <>
+            <div className="recording-bar">
+              <div className="rec-dot" />
+              <span className="rec-timer">{fmtRec(recTime)}</span>
+              <span className="rec-label">Recording…</span>
+            </div>
+            <button className="icon-btn" title="Stop & send" onClick={stopRecording}
+              style={{ color: 'var(--danger)', background: 'var(--danger-bg)' }}>
+              <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                <rect x="6" y="6" width="12" height="12" rx="2" />
+              </svg>
+            </button>
+          </>
+        ) : (
+          <>
+            {/* Attachment */}
+            <button className="icon-btn" title="Send file / image" onClick={() => fileInputRef.current?.click()}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="21" height="21">
+                <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            <input ref={fileInputRef} type="file" style={{ display: 'none' }} onChange={handleFileChange} accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.zip,.txt" />
+
+            <textarea
+              className="msg-input"
+              value={text}
+              onChange={e => setText(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Message…"
+              rows={1}
+            />
+
+            {text.trim() ? (
+              <button className="send-btn" onClick={sendMessage}>
+                <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                  <path d="M1.101 21.757L23.8 12.028 1.101 2.3l.011 7.912 13.623 1.816-13.623 1.817-.011 7.912z" />
+                </svg>
+              </button>
+            ) : (
+              <button className="icon-btn" title="Record voice" onClick={startRecording}
+                style={{ color: 'var(--accent-bright)' }}>
+                <svg viewBox="0 0 24 24" fill="currentColor" width="21" height="21">
+                  <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1-9c0-.55.45-1 1-1s1 .45 1 1v6c0 .55-.45 1-1 1s-1-.45-1-1V5zm6 6c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />
+                </svg>
+              </button>
+            )}
+          </>
+        )}
       </div>
     </div>
   )

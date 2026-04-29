@@ -1,6 +1,7 @@
-import { initializeApp, getApps, getApp } from 'firebase/app'
+import { initializeApp, getApps } from 'firebase/app'
 import { getAuth } from 'firebase/auth'
 import { getFirestore } from 'firebase/firestore'
+import { getStorage } from 'firebase/storage'
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -11,12 +12,11 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
 }
 
-// Primary app
 export const app = getApps().find(a => a.name === '[DEFAULT]') ?? initializeApp(firebaseConfig)
-export const auth = getAuth(app)
-export const db = getFirestore(app)
+export const secondaryApp = getApps().find(a => a.name === 'secondary') ?? initializeApp(firebaseConfig, 'secondary')
 
-// Secondary app — used by admin to create users without logging in as them
-export const secondaryApp =
-  getApps().find(a => a.name === 'secondary') ?? initializeApp(firebaseConfig, 'secondary')
+export const auth = getAuth(app)
 export const secondaryAuth = getAuth(secondaryApp)
+export const db = getFirestore(app)
+export const secondaryDb = getFirestore(secondaryApp)
+export const storage = getStorage(app)
