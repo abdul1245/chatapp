@@ -42,7 +42,10 @@ export default function ChatApp({ user, moderation }) {
     await signOut(auth)
   }
 
-  const handleSelectChat = chat => { setSelectedChat(chat); setMobileChatOpen(true) }
+  const handleSelectChat = chat => {
+    setSelectedChat(chat)
+    setMobileChatOpen(Boolean(chat))
+  }
 
   return (
     <div className="chat-app">

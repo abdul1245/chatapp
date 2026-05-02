@@ -1225,7 +1225,8 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
   }
 
   .messages-area {
-    padding: 12px 10px;
+    padding: 58px 10px 12px;
+    scroll-padding-top: 58px;
     gap: 4px;
   }
 
@@ -1247,6 +1248,11 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
     opacity: 1;
     min-width: 26px;
     min-height: 30px;
+  }
+
+  .msg-menu {
+    top: -42px;
+    z-index: 30;
   }
 
   .msg-image {
@@ -2001,6 +2007,58 @@ body {
   padding: 4px;
   border-radius: var(--radius);
   margin-bottom: 4px;
+}
+
+@media (max-width: 768px) {
+  .modal-overlay:has(.settings-modal) {
+    align-items: flex-start;
+    justify-content: center;
+    overflow-y: auto;
+  }
+
+  .settings-modal {
+    width: 100%;
+    max-width: calc(100vw - 20px);
+    max-height: calc(100dvh - 20px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    padding: 16px;
+    gap: 12px;
+    overflow-y: auto;
+    align-self: flex-start;
+    margin-top: env(safe-area-inset-top, 0px);
+  }
+
+  .settings-modal .modal-header,
+  .settings-modal .settings-tabs {
+    position: sticky;
+    z-index: 5;
+    background: var(--bg-3);
+  }
+
+  .settings-modal .modal-header {
+    top: 0;
+    padding-bottom: 8px;
+  }
+
+  .settings-modal .settings-tabs {
+    top: 52px;
+    margin: 0 -2px 4px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .settings-modal .settings-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .settings-modal .admin-tab {
+    flex: 1 0 142px;
+    min-height: 38px;
+    white-space: nowrap;
+  }
+
+  .settings-content {
+    padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  }
 }
 .settings-content {
   display: flex;
