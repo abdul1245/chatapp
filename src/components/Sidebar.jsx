@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import {
   collection, query, where, onSnapshot,
   doc, getDoc, getDocs, addDoc, serverTimestamp, updateDoc,
+  arrayUnion, arrayRemove,
 } from 'firebase/firestore'
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage'
 import { db, storage } from '../firebase'
@@ -17,6 +18,18 @@ const getStoredContactNames = uid => {
   }
 }
 
+const getStoredHiddenChats = uid => {
+  try {
+    return JSON.parse(localStorage.getItem(`hiddenChats_${uid}`) || '[]')
+  } catch {
+    return []
+  }
+}
+
+const chatIsHiddenForUser = (chat, uid, localHiddenIds) => {
+  return localHiddenIds.includes(chat.id) || chat.hiddenFor?.includes(uid)
+}
+
 export default function Sidebar({ user, selectedChat, onSelectChat, onLogout, onSettings }) {
   const { tr } = useAppContext()
   const [chats, setChats]               = useState([])
@@ -24,15 +37,10 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout, on
   const [contactNames, setContactNames] = useState(() => getStoredContactNames(user.uid))
   const [myData, setMyData]             = useState(null)
   const [deletingChat, setDeletingChat] = useState(null)
-  const [hiddenChats, setHiddenChats] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem(`hiddenChats_${user.uid}`) || '[]')
-    } catch {
-      return []
-    }
-  })
+  const [hiddenChats, setHiddenChats] = useState(() => getStoredHiddenChats(user.uid))
   const [uploadingPic, setUploadingPic] = useState(false)
   const picInputRef = useRef(null)
+  const chatLoadSeqRef = useRef(0)
 
   // Listen to own user doc in real-time so avatar updates immediately
   useEffect(() => {
@@ -45,14 +53,23 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout, on
   useEffect(() => {
     const q = query(collection(db, 'chats'), where('participants', 'array-contains', user.uid))
     const unsub = onSnapshot(q, async snap => {
+      const seq = ++chatLoadSeqRef.current
+      const localHiddenIds = getStoredHiddenChats(user.uid)
+      const rawChats = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+      const visibleRawChats = rawChats.filter(chat => !chatIsHiddenForUser(chat, user.uid, localHiddenIds))
+      const visibleIds = new Set(visibleRawChats.map(chat => chat.id))
+      setChats(prev => prev.filter(chat => visibleIds.has(chat.id)))
+
+      if (selectedChat?.id && !visibleRawChats.some(chat => chat.id === selectedChat.id)) {
+        onSelectChat(null)
+      }
+
       const list = await Promise.all(
-        snap.docs.map(async d => {
-          const data = d.data()
+        visibleRawChats.map(async data => {
           const otherId = data.participants.find(p => p !== user.uid)
           const otherSnap = await getDoc(doc(db, 'users', otherId))
           const otherData = otherSnap.exists() ? otherSnap.data() : {}
           return {
-            id: d.id,
             ...data,
             otherId,
             otherName: buildDisplayName(otherData),
@@ -61,15 +78,23 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout, on
           }
         })
       )
+      if (seq !== chatLoadSeqRef.current) return
       list.sort((a, b) => {
         const ta = a.lastMessage?.timestamp?.toMillis?.() ?? a.createdAt?.toMillis?.() ?? 0
         const tb = b.lastMessage?.timestamp?.toMillis?.() ?? b.createdAt?.toMillis?.() ?? 0
         return tb - ta
       })
-      setChats(list.filter(chat => !hiddenChats.includes(chat.id)))
+      setChats(list)
     })
     return unsub
-  }, [hiddenChats, user.uid, tr.unknown])
+  }, [onSelectChat, selectedChat?.id, user.uid, tr.unknown])
+
+  useEffect(() => {
+    if (!hiddenChats.length) return
+    hiddenChats.forEach(chatId => {
+      updateDoc(doc(db, 'chats', chatId), { hiddenFor: arrayUnion(user.uid) }).catch(() => {})
+    })
+  }, [hiddenChats, user.uid])
 
   useEffect(() => {
     const refreshContactNames = () => setContactNames(getStoredContactNames(user.uid))
@@ -117,8 +142,27 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout, on
     const otherDoc = snap.docs[0]
     const otherId  = otherDoc.id
     if (otherId === user.uid) return { error: tr.ownNumberError }
-    const existing = chats.find(c => c.otherId === otherId)
-    if (existing) { onSelectChat(existing); setShowModal(false); return { success: true } }
+    const existingSnap = await getDocs(query(collection(db, 'chats'), where('participants', 'array-contains', user.uid)))
+    const existingDoc = existingSnap.docs.find(d => d.data().participants?.includes(otherId))
+    if (existingDoc) {
+      const data = existingDoc.data()
+      if (chatIsHiddenForUser({ id: existingDoc.id, ...data }, user.uid, hiddenChats)) {
+        await updateDoc(doc(db, 'chats', existingDoc.id), { hiddenFor: arrayRemove(user.uid) })
+        const nextHidden = hiddenChats.filter(id => id !== existingDoc.id)
+        setHiddenChats(nextHidden)
+        localStorage.setItem(`hiddenChats_${user.uid}`, JSON.stringify(nextHidden))
+      }
+      onSelectChat({
+        id: existingDoc.id,
+        ...data,
+        otherId,
+        otherName: buildDisplayName(otherDoc.data()),
+        otherPhone: otherDoc.data().phoneNumber,
+        otherPhoto: otherDoc.data().photoURL || null,
+      })
+      setShowModal(false)
+      return { success: true }
+    }
     const chatRef = await addDoc(collection(db, 'chats'), {
       participants: [user.uid, otherId],
       createdAt: serverTimestamp(),
@@ -138,12 +182,19 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout, on
 
   const confirmDeleteChat = async () => {
     if (!deletingChat) return
-    const nextHidden = [...new Set([...hiddenChats, deletingChat.id])]
+    const chatToDelete = deletingChat
+    const nextHidden = [...new Set([...hiddenChats, chatToDelete.id])]
     setHiddenChats(nextHidden)
+    setChats(prev => prev.filter(chat => chat.id !== chatToDelete.id))
     localStorage.setItem(`hiddenChats_${user.uid}`, JSON.stringify(nextHidden))
-    localStorage.removeItem(`del_${user.uid}_${deletingChat.id}`)
-    if (selectedChat?.id === deletingChat.id) onSelectChat(null)
+    localStorage.removeItem(`del_${user.uid}_${chatToDelete.id}`)
+    if (selectedChat?.id === chatToDelete.id) onSelectChat(null)
     setDeletingChat(null)
+    try {
+      await updateDoc(doc(db, 'chats', chatToDelete.id), { hiddenFor: arrayUnion(user.uid) })
+    } catch (err) {
+      alert(`${tr.deleteChat}: ${err.message}`)
+    }
   }
 
   return (

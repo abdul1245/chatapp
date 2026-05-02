@@ -2,12 +2,25 @@ import { useCallback, useState, useEffect, useMemo, useRef } from 'react'
 import {
   collection, query, orderBy, onSnapshot,
   addDoc, serverTimestamp, doc, updateDoc, setDoc, getDoc, writeBatch,
+  arrayUnion,
 } from 'firebase/firestore'
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage'
 import { db, storage } from '../firebase'
 import Message from './Message'
 import { useAppContext } from '../context/AppContext'
 import { buildDisplayName } from '../profile'
+
+const getStoredDeletedIds = (uid, chatId) => {
+  try {
+    return JSON.parse(localStorage.getItem(`del_${uid}_${chatId}`) || '[]')
+  } catch {
+    return []
+  }
+}
+
+const isDeletedForUser = (message, uid, localDeletedIds) => {
+  return localDeletedIds.includes(message.id) || message.deletedFor?.includes(uid)
+}
 
 export default function ChatWindow({ chat, currentUser, moderation, onBack }) {
   const { tr } = useAppContext()
@@ -36,10 +49,7 @@ export default function ChatWindow({ chat, currentUser, moderation, onBack }) {
   const [uploading, setUploading]     = useState(false)
   const [recording, setRecording]     = useState(false)
   const [recTime, setRecTime]         = useState(0)
-  const [deletedIds, setDeletedIds]   = useState(() => {
-    const s = localStorage.getItem(`del_${currentUser.uid}_${chat.id}`)
-    return s ? JSON.parse(s) : []
-  })
+  const [deletedIds, setDeletedIds]   = useState(() => getStoredDeletedIds(currentUser.uid, chat.id))
 
   const bottomRef    = useRef(null)
   const fileInputRef = useRef(null)
@@ -94,6 +104,13 @@ export default function ChatWindow({ chat, currentUser, moderation, onBack }) {
     })
     return unsub
   }, [chat.id, currentUser.uid])
+
+  useEffect(() => {
+    if (!deletedIds.length) return
+    deletedIds.forEach(msgId => {
+      updateDoc(doc(db, 'chats', chat.id, 'messages', msgId), { deletedFor: arrayUnion(currentUser.uid) }).catch(() => {})
+    })
+  }, [chat.id, currentUser.uid, deletedIds])
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
@@ -244,10 +261,17 @@ export default function ChatWindow({ chat, currentUser, moderation, onBack }) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!isTimedOut) sendMessage() }
   }
 
-  const deleteMessage = msgId => {
-    const updated = [...deletedIds, msgId]
-    setDeletedIds(updated)
-    localStorage.setItem(`del_${currentUser.uid}_${chat.id}`, JSON.stringify(updated))
+  const deleteMessage = async msgId => {
+    setDeletedIds(prev => {
+      const updated = [...new Set([...prev, msgId])]
+      localStorage.setItem(`del_${currentUser.uid}_${chat.id}`, JSON.stringify(updated))
+      return updated
+    })
+    try {
+      await updateDoc(doc(db, 'chats', chat.id, 'messages', msgId), { deletedFor: arrayUnion(currentUser.uid) })
+    } catch (err) {
+      alert(`${tr.deleteForMe}: ${err.message}`)
+    }
   }
 
   const saveContactName = () => {
@@ -265,7 +289,7 @@ export default function ChatWindow({ chat, currentUser, moderation, onBack }) {
     setEditingName(false)
   }
 
-  const visibleMessages = messages.filter(m => !deletedIds.includes(m.id))
+  const visibleMessages = messages.filter(m => !isDeletedForUser(m, currentUser.uid, deletedIds))
   const fmtRec = s => `${Math.floor(s/60).toString().padStart(2,'0')}:${(s%60).toString().padStart(2,'0')}`
 
   return (
