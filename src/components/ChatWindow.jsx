@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import {
   collection, query, orderBy, onSnapshot,
   addDoc, serverTimestamp, doc, updateDoc, setDoc, getDoc, writeBatch,
@@ -6,15 +6,29 @@ import {
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage'
 import { db, storage } from '../firebase'
 import Message from './Message'
+import { useAppContext } from '../context/AppContext'
+import { buildDisplayName } from '../profile'
 
-export default function ChatWindow({ chat, currentUser, onBack }) {
+export default function ChatWindow({ chat, currentUser, moderation, onBack }) {
+  const { tr } = useAppContext()
   const [messages, setMessages]       = useState([])
   const [text, setText]               = useState('')
-  const [contactName, setContactName] = useState('')
   const [editingName, setEditingName] = useState(false)
-  const [tempName, setTempName]       = useState('')
+  const [otherProfile, setOtherProfile] = useState(null)
+  const suggestedContactName = useMemo(() => {
+    return buildDisplayName(otherProfile) || chat.otherName || chat.otherPhone
+  }, [chat.otherName, chat.otherPhone, otherProfile])
+  const initialContactName = useMemo(() => {
+    try {
+      const names = JSON.parse(localStorage.getItem(`contactNames_${currentUser.uid}`) || '{}')
+      return String(names[chat.otherId] || '').trim() || suggestedContactName
+    } catch {
+      return suggestedContactName
+    }
+  }, [chat.otherId, currentUser.uid, suggestedContactName])
+  const [contactName, setContactName] = useState(initialContactName)
+  const [tempName, setTempName]       = useState(initialContactName)
   const [otherPhoto, setOtherPhoto]   = useState(null)
-  const [myPhoto, setMyPhoto]         = useState(null)
   const [uploading, setUploading]     = useState(false)
   const [recording, setRecording]     = useState(false)
   const [recTime, setRecTime]         = useState(0)
@@ -28,22 +42,22 @@ export default function ChatWindow({ chat, currentUser, onBack }) {
   const mediaRecRef  = useRef(null)
   const timerRef     = useRef(null)
   const chunksRef    = useRef([])
+  const isTimedOut = moderation?.type === 'timeout'
 
-  // Load contact name and photos
   useEffect(() => {
-    const names = JSON.parse(localStorage.getItem(`contactNames_${currentUser.uid}`) || '{}')
-    const name = names[chat.otherId] || chat.otherPhone
-    setContactName(name)
-    setTempName(name)
+    setContactName(initialContactName)
+    setTempName(initialContactName)
+  }, [initialContactName])
 
-    // Load photos
-    getDoc(doc(db, 'users', chat.otherId)).then(snap => {
-      if (snap.exists()) setOtherPhoto(snap.data().photoURL || null)
+  // Load contact profile
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, 'users', chat.otherId), snap => {
+      const data = snap.exists() ? snap.data() : null
+      setOtherProfile(data)
+      setOtherPhoto(data?.photoURL || null)
     })
-    getDoc(doc(db, 'users', currentUser.uid)).then(snap => {
-      if (snap.exists()) setMyPhoto(snap.data().photoURL || null)
-    })
-  }, [chat.otherId, chat.otherPhone, currentUser.uid])
+    return unsub
+  }, [chat.otherId])
 
   // Mark this chat as open in the status doc
   useEffect(() => {
@@ -83,26 +97,9 @@ export default function ChatWindow({ chat, currentUser, onBack }) {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  // Profile picture upload
-  const handleProfilePicChange = async e => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    setUploading(true)
-    try {
-      const fileRef = ref(storage, `profilePictures/${currentUser.uid}`)
-      await uploadBytes(fileRef, file)
-      const url = await getDownloadURL(fileRef)
-      await updateDoc(doc(db, 'users', currentUser.uid), { photoURL: url })
-      setMyPhoto(url)
-    } catch (err) {
-      alert('Upload failed: ' + err.message)
-    } finally {
-      setUploading(false)
-    }
-  }
-
   // Send text message
   const sendMessage = async () => {
+    if (isTimedOut) return
     if (!text.trim()) return
     const trimmed = text.trim()
     setText('')
@@ -133,6 +130,7 @@ export default function ChatWindow({ chat, currentUser, onBack }) {
 
   // Send file (image or document)
   const handleFileChange = async e => {
+  if (isTimedOut) return
   const file = e.target.files?.[0]
   if (!file) return
   e.target.value = ''
@@ -143,15 +141,12 @@ export default function ChatWindow({ chat, currentUser, onBack }) {
   setUploading(true)
   try {
     const storageRef = ref(storage, `chatFiles/${chat.id}/${Date.now()}_${file.name}`)
-    console.log('Uploading to:', storageRef.fullPath)
 
     const snapshot = await uploadBytes(storageRef, file)
-    console.log('Upload done, getting URL...')
 
     const url = await getDownloadURL(snapshot.ref)
-    console.log('URL:', url)
 
-    if (!url) throw new Error('Download URL came back empty')
+    if (!url) throw new Error(tr.uploadFailed)
 
     const msgRef = await addDoc(collection(db, 'chats', chat.id, 'messages'), {
       senderId: currentUser.uid,
@@ -168,7 +163,7 @@ export default function ChatWindow({ chat, currentUser, onBack }) {
     upgradeStatus(msgRef.id)
   } catch (err) {
     console.error('File upload error:', err)
-    alert('Upload failed: ' + err.message)
+    alert(`${tr.uploadFailed}: ${err.message}`)
   } finally {
     setUploading(false)
   }
@@ -176,6 +171,7 @@ export default function ChatWindow({ chat, currentUser, onBack }) {
 
   // Voice recording
   const startRecording = async () => {
+    if (isTimedOut) return
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       const mr = new MediaRecorder(stream)
@@ -192,7 +188,7 @@ export default function ChatWindow({ chat, currentUser, onBack }) {
       setRecording(true)
       timerRef.current = setInterval(() => setRecTime(t => t + 1), 1000)
     } catch {
-      alert('Microphone permission denied.')
+      alert(tr.microphonePermissionDenied)
     }
   }
 
@@ -212,7 +208,7 @@ export default function ChatWindow({ chat, currentUser, onBack }) {
     const snapshot = await uploadBytes(storageRef, blob)
     const url = await getDownloadURL(snapshot.ref)
 
-    if (!url) throw new Error('Download URL came back empty')
+    if (!url) throw new Error(tr.voiceUploadFailed)
 
     const msgRef = await addDoc(collection(db, 'chats', chat.id, 'messages'), {
       senderId: currentUser.uid,
@@ -228,14 +224,14 @@ export default function ChatWindow({ chat, currentUser, onBack }) {
     upgradeStatus(msgRef.id)
   } catch (err) {
     console.error('Voice upload error:', err)
-    alert('Voice upload failed: ' + err.message)
+    alert(`${tr.voiceUploadFailed}: ${err.message}`)
   } finally {
     setUploading(false)
   }
 }
 
   const handleKeyDown = e => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!isTimedOut) sendMessage() }
   }
 
   const deleteMessage = msgId => {
@@ -246,29 +242,33 @@ export default function ChatWindow({ chat, currentUser, onBack }) {
 
   const saveContactName = () => {
     const names = JSON.parse(localStorage.getItem(`contactNames_${currentUser.uid}`) || '{}')
-    names[chat.otherId] = tempName
+    const trimmedName = tempName.trim()
+    if (trimmedName) {
+      names[chat.otherId] = trimmedName
+    } else {
+      delete names[chat.otherId]
+    }
     localStorage.setItem(`contactNames_${currentUser.uid}`, JSON.stringify(names))
-    setContactName(tempName)
+    window.dispatchEvent(new Event('contactNamesChanged'))
+    setContactName(trimmedName || suggestedContactName)
+    setTempName(trimmedName || suggestedContactName)
     setEditingName(false)
   }
 
   const visibleMessages = messages.filter(m => !deletedIds.includes(m.id))
   const fmtRec = s => `${Math.floor(s/60).toString().padStart(2,'0')}:${(s%60).toString().padStart(2,'0')}`
 
-  // hidden profile pic input ref
-  const picInputRef = useRef(null)
-
   return (
     <div className="chat-window">
       {/* Header */}
       <div className="chat-header">
-        <button className="icon-btn chat-header-back" onClick={onBack} title="Back">
+        <button className="icon-btn chat-header-back" onClick={onBack} title={tr.backTitle}>
           <svg viewBox="0 0 24 24" fill="currentColor" width="22" height="22">
             <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z" />
           </svg>
         </button>
 
-        <div className="avatar" onClick={() => {}} title="Their profile">
+        <div className="avatar" onClick={() => {}} title={tr.theirProfile}>
           {otherPhoto
             ? <img src={otherPhoto} alt="" />
             : <span>{contactName[0]?.toUpperCase()}</span>}
@@ -291,7 +291,7 @@ export default function ChatWindow({ chat, currentUser, onBack }) {
             <div
               className="contact-name"
               onClick={() => { setTempName(contactName); setEditingName(true) }}
-              title="Click to rename"
+              title={tr.clickToRename}
             >
               {contactName}
               <svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12" opacity="0.4">
@@ -305,9 +305,9 @@ export default function ChatWindow({ chat, currentUser, onBack }) {
 
       {/* Messages */}
       <div className="messages-area" style={{ position: 'relative' }}>
-        {uploading && <div className="uploading-bar">⬆ Uploading…</div>}
+        {uploading && <div className="uploading-bar">{tr.uploading}</div>}
         {visibleMessages.length === 0 && (
-          <div className="no-messages">Say hello! 👋</div>
+          <div className="no-messages">{tr.noMessages}</div>
         )}
         {visibleMessages.map(msg => (
           <Message
@@ -322,14 +322,19 @@ export default function ChatWindow({ chat, currentUser, onBack }) {
 
       {/* Input bar */}
       <div className="input-bar">
+        {isTimedOut && (
+          <div className="timeout-compose-notice">
+            {tr.timedOutComposeNotice}
+          </div>
+        )}
         {recording ? (
           <>
             <div className="recording-bar">
               <div className="rec-dot" />
               <span className="rec-timer">{fmtRec(recTime)}</span>
-              <span className="rec-label">Recording…</span>
+              <span className="rec-label">{tr.recording}</span>
             </div>
-            <button className="icon-btn" title="Stop & send" onClick={stopRecording}
+            <button className="icon-btn" title={tr.stopAndSend} onClick={stopRecording}
               style={{ color: 'var(--danger)', background: 'var(--danger-bg)' }}>
               <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
                 <rect x="6" y="6" width="12" height="12" rx="2" />
@@ -339,7 +344,7 @@ export default function ChatWindow({ chat, currentUser, onBack }) {
         ) : (
           <>
             {/* Attachment */}
-            <button className="icon-btn" title="Send file / image" onClick={() => fileInputRef.current?.click()}>
+            <button className="icon-btn" title={tr.sendFileImage} onClick={() => fileInputRef.current?.click()} disabled={isTimedOut}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="21" height="21">
                 <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
@@ -351,18 +356,19 @@ export default function ChatWindow({ chat, currentUser, onBack }) {
               value={text}
               onChange={e => setText(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Message…"
+              placeholder={isTimedOut ? tr.timedOutPlaceholder : tr.messagePlaceholder}
+              disabled={isTimedOut}
               rows={1}
             />
 
             {text.trim() ? (
-              <button className="send-btn" onClick={sendMessage}>
+              <button className="send-btn" onClick={sendMessage} disabled={isTimedOut}>
                 <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
                   <path d="M1.101 21.757L23.8 12.028 1.101 2.3l.011 7.912 13.623 1.816-13.623 1.817-.011 7.912z" />
                 </svg>
               </button>
             ) : (
-              <button className="icon-btn" title="Record voice" onClick={startRecording}
+              <button className="icon-btn" title={tr.recordVoice} onClick={startRecording} disabled={isTimedOut}
                 style={{ color: 'var(--accent-bright)' }}>
                 <svg viewBox="0 0 24 24" fill="currentColor" width="21" height="21">
                   <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1-9c0-.55.45-1 1-1s1 .45 1 1v6c0 .55-.45 1-1 1s-1-.45-1-1V5zm6 6c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />

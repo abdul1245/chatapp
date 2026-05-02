@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useId } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { onAuthStateChanged, signOut } from 'firebase/auth'
 import { doc, onSnapshot } from 'firebase/firestore'
@@ -7,89 +7,79 @@ import Login from './components/Login'
 import Admin from './components/Admin'
 import ChatApp from './components/ChatApp'
 import BannedScreen from './components/BannedScreen'
+import { useAppContext } from './context/AppContext'
 
-// The GtyChat logo as a reusable component
-export function GtyLogo({ size = 48 }) {
+export function GtyLogo({ size = 48, wordmark = false }) {
+  const logoId = useId().replace(/:/g, '')
+  const gradId = `${logoId}-grad`
+  const glowId = `${logoId}-glow`
+
   return (
-    <svg width={size} height={size} viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+    <svg
+      className={`gty-logo ${wordmark ? 'gty-logo-wordmark' : ''}`}
+      width={size}
+      height={size}
+      viewBox="0 0 100 100"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+      focusable="false"
+    >
       <defs>
-        <linearGradient id="gty-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stopColor="#a78bfa" />
-          <stop offset="100%" stopColor="#38bdf8" />
+        <linearGradient id={gradId} x1="16" y1="10" x2="86" y2="92" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="var(--accent)" />
+          <stop offset="58%" stopColor="var(--accent-dim)" />
+          <stop offset="100%" stopColor="var(--sky)" />
+        </linearGradient>
+        <linearGradient id={glowId} x1="24" y1="24" x2="76" y2="76" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#ffffff" />
+          <stop offset="100%" stopColor="#dff7ff" />
         </linearGradient>
       </defs>
-      {/* Hexagon */}
-      <polygon
-        points="50,4 93,27 93,73 50,96 7,73 7,27"
-        fill="none"
-        stroke="url(#gty-grad)"
-        strokeWidth="3.5"
-        strokeLinejoin="round"
-      />
-      {/* Inner glow ring */}
-      <polygon
-        points="50,14 85,33 85,67 50,86 15,67 15,33"
-        fill="rgba(139,92,246,0.07)"
-        stroke="rgba(139,92,246,0.15)"
-        strokeWidth="1"
-        strokeLinejoin="round"
-      />
-      {/* G letter */}
-      <text
-        x="51"
-        y="68"
-        textAnchor="middle"
-        fontSize="46"
-        fontFamily="Syne, sans-serif"
-        fontWeight="800"
-        fill="url(#gty-grad)"
-      >
-        G
-      </text>
+      <rect x="10" y="10" width="80" height="80" rx="24" fill={`url(#${gradId})`} />
+      <path d="M66 25H43c-9.9 0-18 7.4-18 16.5S33.1 58 43 58h7.5l13.4 9.6c1.5 1.1 3.6-.2 3.4-2.1L66.4 58C76 57.8 84 50.5 84 41.5 84 32.4 75.9 25 66 25Z" fill="#ffffff" opacity=".32" />
+      <path d="M35 32h26c8.3 0 15 6.2 15 13.8s-6.7 13.8-15 13.8h-8.3L39.9 69c-1.7 1.2-4-.2-3.7-2.2l1.1-7.7C30.3 58 25 52.4 25 45.8 25 38.2 31.7 32 35 32Z" fill={`url(#${glowId})`} />
+      <path d="M39 43h22M39 52h14" stroke="var(--accent)" strokeWidth="5" strokeLinecap="round" opacity=".95" />
+      <circle cx="66" cy="52" r="5" fill="var(--sky)" />
+      <path d="M19 25c4.1-5.4 9.8-9 16.5-10.4" stroke="#ffffff" strokeWidth="4" strokeLinecap="round" opacity=".26" />
     </svg>
   )
 }
 
 export default function App() {
-  const [user, setUser] = useState(undefined)
+  const { setLang, setTheme, setThemeColor } = useAppContext()
+  const [user, setUser]             = useState(undefined)
   const [moderation, setModeration] = useState(null)
-  const sessionStart = useRef(Date.now())
+  const sessionStart                = useRef(null)
 
- useEffect(() => {
-  const unsub = onAuthStateChanged(auth, u => {
-    if (u) {
-      // Reset session clock to NOW so any old logoutSignal won't trigger
-      sessionStart.current = Date.now()
-    }
-    setUser(u)
-    if (!u) setModeration(null)
-  })
-  return unsub
-}, [])
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, u => {
+      if (u) sessionStart.current = Date.now() // reset on every login
+      setUser(u)
+      if (!u) setModeration(null)
+    })
+    return unsub
+  }, [])
 
-  // Listen to user doc for bans, timeouts, and forced logouts
   useEffect(() => {
     if (!user) return
     const unsub = onSnapshot(doc(db, 'users', user.uid), snap => {
       if (!snap.exists()) return
       const data = snap.data()
-
-      // Force logout if admin changed credentials
+      if (data.language) setLang(data.language)
+      if (data.theme) setTheme(data.theme)
+      if (data.themeColor) setThemeColor(data.themeColor)
       if (data.logoutSignal?.toMillis?.() > sessionStart.current) {
-        signOut(auth)
-        return
+        signOut(auth); return
       }
-
-      // Check moderation
       const mod = data.moderation
       if (mod) {
-        const isActive = !mod.until || mod.until.toMillis() > Date.now()
-        if (isActive) { setModeration(mod); return }
+        const active = !mod.until || (mod.until?.toMillis?.() ?? 0) > Date.now()
+        if (active) { setModeration(mod); return }
       }
       setModeration(null)
     })
     return unsub
-  }, [user])
+  }, [user, setLang, setTheme, setThemeColor])
 
   if (user === undefined) {
     return (
@@ -100,7 +90,7 @@ export default function App() {
     )
   }
 
-  if (user && moderation) {
+  if (user && moderation?.type === 'ban') {
     return (
       <BannedScreen
         moderation={moderation}
@@ -112,10 +102,10 @@ export default function App() {
 
   return (
     <Routes>
-      <Route path="/login"  element={user ? <Navigate to="/" /> : <Login />} />
-      <Route path="/admin"  element={<Admin />} />
-      <Route path="/"       element={user ? <ChatApp user={user} /> : <Navigate to="/login" />} />
-      <Route path="*"       element={<Navigate to="/" />} />
+      <Route path="/login" element={user ? <Navigate to="/" /> : <Login />} />
+      <Route path="/admin" element={<Admin />} />
+      <Route path="/"      element={user ? <ChatApp user={user} moderation={moderation} /> : <Navigate to="/login" />} />
+      <Route path="*"      element={<Navigate to="/" />} />
     </Routes>
   )
 }

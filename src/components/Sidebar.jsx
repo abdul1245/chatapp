@@ -1,26 +1,38 @@
 import { useState, useEffect, useRef } from 'react'
 import {
   collection, query, where, onSnapshot,
-  doc, getDoc, getDocs, addDoc, serverTimestamp, deleteDoc, writeBatch, updateDoc,
+  doc, getDoc, getDocs, addDoc, serverTimestamp, updateDoc,
 } from 'firebase/firestore'
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage'
 import { db, storage } from '../firebase'
-import { GtyLogo } from '../App'
+import { useAppContext } from '../context/AppContext'
 import NewChatModal from './NewChatModal'
+import { buildDisplayName } from '../profile'
 
-export default function Sidebar({ user, selectedChat, onSelectChat, onLogout }) {
+const getStoredContactNames = uid => {
+  try {
+    return JSON.parse(localStorage.getItem(`contactNames_${uid}`) || '{}')
+  } catch {
+    return {}
+  }
+}
+
+export default function Sidebar({ user, selectedChat, onSelectChat, onLogout, onSettings }) {
+  const { tr } = useAppContext()
   const [chats, setChats]               = useState([])
   const [showModal, setShowModal]       = useState(false)
-  const [contactNames, setContactNames] = useState({})
+  const [contactNames, setContactNames] = useState(() => getStoredContactNames(user.uid))
   const [myData, setMyData]             = useState(null)
   const [deletingChat, setDeletingChat] = useState(null)
+  const [hiddenChats, setHiddenChats] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem(`hiddenChats_${user.uid}`) || '[]')
+    } catch {
+      return []
+    }
+  })
   const [uploadingPic, setUploadingPic] = useState(false)
   const picInputRef = useRef(null)
-
-  useEffect(() => {
-    const stored = localStorage.getItem(`contactNames_${user.uid}`)
-    if (stored) setContactNames(JSON.parse(stored))
-  }, [user.uid])
 
   // Listen to own user doc in real-time so avatar updates immediately
   useEffect(() => {
@@ -43,7 +55,8 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout }) 
             id: d.id,
             ...data,
             otherId,
-            otherPhone: otherData.phoneNumber || 'Unknown',
+            otherName: buildDisplayName(otherData),
+            otherPhone: otherData.phoneNumber || tr.unknown,
             otherPhoto: otherData.photoURL || null,
           }
         })
@@ -53,9 +66,19 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout }) 
         const tb = b.lastMessage?.timestamp?.toMillis?.() ?? b.createdAt?.toMillis?.() ?? 0
         return tb - ta
       })
-      setChats(list)
+      setChats(list.filter(chat => !hiddenChats.includes(chat.id)))
     })
     return unsub
+  }, [hiddenChats, user.uid, tr.unknown])
+
+  useEffect(() => {
+    const refreshContactNames = () => setContactNames(getStoredContactNames(user.uid))
+    window.addEventListener('contactNamesChanged', refreshContactNames)
+    window.addEventListener('storage', refreshContactNames)
+    return () => {
+      window.removeEventListener('contactNamesChanged', refreshContactNames)
+      window.removeEventListener('storage', refreshContactNames)
+    }
   }, [user.uid])
 
   // ── Profile picture upload (always changes YOUR OWN picture) ──
@@ -71,13 +94,13 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout }) 
       // Always writes to YOUR OWN uid — not the other person's
       await updateDoc(doc(db, 'users', user.uid), { photoURL: url })
     } catch (err) {
-      alert('Profile picture upload failed: ' + err.message)
+      alert(`${tr.profilePictureUploadFailed}: ${err.message}`)
     } finally {
       setUploadingPic(false)
     }
   }
 
-  const getDisplayName = chat => contactNames[chat.otherId] || chat.otherPhone
+  const getDisplayName = chat => contactNames[chat.otherId] || chat.otherName || chat.otherPhone
 
   const formatTime = ts => {
     if (!ts) return ''
@@ -90,10 +113,10 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout }) 
   const handleCreate = async phone => {
     const trimmed = phone.trim()
     const snap = await getDocs(query(collection(db, 'users'), where('phoneNumber', '==', trimmed)))
-    if (snap.empty) return { error: 'No user found with that number.' }
+    if (snap.empty) return { error: tr.noUserFoundWithNumber }
     const otherDoc = snap.docs[0]
     const otherId  = otherDoc.id
-    if (otherId === user.uid) return { error: "That's your own number!" }
+    if (otherId === user.uid) return { error: tr.ownNumberError }
     const existing = chats.find(c => c.otherId === otherId)
     if (existing) { onSelectChat(existing); setShowModal(false); return { success: true } }
     const chatRef = await addDoc(collection(db, 'chats'), {
@@ -105,6 +128,7 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout }) 
       id: chatRef.id,
       participants: [user.uid, otherId],
       otherId,
+      otherName: buildDisplayName(otherDoc.data()),
       otherPhone: otherDoc.data().phoneNumber,
       lastMessage: null,
     })
@@ -114,18 +138,12 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout }) 
 
   const confirmDeleteChat = async () => {
     if (!deletingChat) return
-    try {
-      const msgsSnap = await getDocs(collection(db, 'chats', deletingChat.id, 'messages'))
-      const batch = writeBatch(db)
-      msgsSnap.docs.forEach(m => batch.delete(m.ref))
-      await batch.commit()
-      await deleteDoc(doc(db, 'chats', deletingChat.id))
-      localStorage.removeItem(`del_${user.uid}_${deletingChat.id}`)
-      if (selectedChat?.id === deletingChat.id) onSelectChat(null)
-      setDeletingChat(null)
-    } catch (err) {
-      alert('Failed to delete: ' + err.message)
-    }
+    const nextHidden = [...new Set([...hiddenChats, deletingChat.id])]
+    setHiddenChats(nextHidden)
+    localStorage.setItem(`hiddenChats_${user.uid}`, JSON.stringify(nextHidden))
+    localStorage.removeItem(`del_${user.uid}_${deletingChat.id}`)
+    if (selectedChat?.id === deletingChat.id) onSelectChat(null)
+    setDeletingChat(null)
   }
 
   return (
@@ -136,7 +154,7 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout }) 
         <div
           className="avatar avatar-sm"
           onClick={() => picInputRef.current?.click()}
-          title="Change your profile picture"
+          title={tr.changeProfilePicture}
           style={{ cursor: 'pointer' }}
         >
           {myData?.photoURL
@@ -159,26 +177,30 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout }) 
         <span className="sidebar-brand">GtyChat</span>
 
         <div className="sidebar-actions">
-          <button className="icon-btn" title="New chat" onClick={() => setShowModal(true)}>
-            <svg viewBox="0 0 24 24" fill="currentColor" width="21" height="21">
-              <path d="M19.005 3.175H4.674C3.642 3.175 3 3.789 3 4.821V21.02l3.544-3.514h12.461c1.033 0 2.064-1.06 2.064-2.093V4.821c-.001-1.032-1.032-1.646-2.064-1.646zm-4.989 9.869H13v2.016a.5.5 0 01-1 0v-2.016H9.99a.5.5 0 010-1H12V9.869a.5.5 0 011 0v2.175h2.016a.5.5 0 010 1z" />
-            </svg>
-          </button>
-          <button className="icon-btn" title="Log out" onClick={onLogout}>
-            <svg viewBox="0 0 24 24" fill="currentColor" width="19" height="19">
-              <path d="M16 13v-2H7V8l-5 4 5 4v-3z" />
-              <path d="M20 3h-9c-1.1 0-2 .9-2 2v4h2V5h9v14h-9v-4H9v4c0 1.1.9 2 2 2h9c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2z" />
-            </svg>
-          </button>
-        </div>
+  <button className="icon-btn" title={tr.settings} onClick={onSettings}>
+    <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+      <path d="M19.14 12.94c.04-.3.06-.61.06-.94s-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.49.49 0 00-.59-.22l-2.39.96a7.01 7.01 0 00-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87a.48.48 0 00.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 00-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
+    </svg>
+  </button>
+  <button className="icon-btn" title={tr.newChat} onClick={() => setShowModal(true)}>
+    <svg viewBox="0 0 24 24" fill="currentColor" width="21" height="21">
+      <path d="M19.005 3.175H4.674C3.642 3.175 3 3.789 3 4.821V21.02l3.544-3.514h12.461c1.033 0 2.064-1.06 2.064-2.093V4.821c-.001-1.032-1.032-1.646-2.064-1.646zm-4.989 9.869H13v2.016a.5.5 0 01-1 0v-2.016H9.99a.5.5 0 010-1H12V9.869a.5.5 0 011 0v2.175h2.016a.5.5 0 010 1z" />
+    </svg>
+  </button>
+  <button className="icon-btn" title={tr.logout} onClick={onLogout}>
+    <svg viewBox="0 0 24 24" fill="currentColor" width="19" height="19">
+      <path d="M16 13v-2H7V8l-5 4 5 4v-3z" />
+      <path d="M20 3h-9c-1.1 0-2 .9-2 2v4h2V5h9v14h-9v-4H9v4c0 1.1.9 2 2 2h9c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2z" />
+    </svg>
+  </button>
+</div>
       </div>
 
       {/* Chat list */}
       <div className="chats-list">
         {chats.length === 0 && (
           <div className="sidebar-empty">
-            <GtyLogo size={40} />
-            <p>No chats yet.<br />Tap the icon above to start one.</p>
+            <p>{tr.noChats}<br />{tr.tapIconStartChat}</p>
           </div>
         )}
         {chats.map(chat => (
@@ -199,18 +221,18 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout }) 
               </div>
               <div className="chat-row-preview">
                 {chat.lastMessage?.type && chat.lastMessage.type !== 'text'
-                  ? { image: '📷 Photo', voice: '🎤 Voice message', document: '📎 Document' }[chat.lastMessage.type] || '…'
+                  ? { image: tr.photo, voice: tr.voiceMessage, document: tr.document }[chat.lastMessage.type] || '...'
                   : chat.lastMessage?.text
                     ? chat.lastMessage.text.length > 36
-                      ? chat.lastMessage.text.slice(0, 36) + '…'
+                      ? chat.lastMessage.text.slice(0, 36) + '...'
                       : chat.lastMessage.text
-                    : 'No messages yet'}
+                    : tr.noMessagesYet}
               </div>
             </div>
             <button
               className="chat-row-delete"
               onClick={e => { e.stopPropagation(); setDeletingChat(chat) }}
-              title="Delete chat"
+              title={tr.deleteChat}
             >🗑</button>
           </div>
         ))}
@@ -224,15 +246,15 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout }) 
         <div className="modal-overlay" onClick={() => setDeletingChat(null)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
-              <h2>Delete Chat</h2>
+              <h2>{tr.deleteChat}</h2>
               <button className="icon-btn" onClick={() => setDeletingChat(null)}>✕</button>
             </div>
             <div className="modal-warning">
-              ⚠️ This will permanently delete your chat with <strong>{getDisplayName(deletingChat)}</strong> and all messages in it. This cannot be undone.
+              {tr.deleteChatConfirm.replace('{name}', getDisplayName(deletingChat))}
             </div>
             <div className="modal-footer">
-              <button className="btn-secondary" onClick={() => setDeletingChat(null)}>Cancel</button>
-              <button className="btn-danger" style={{ width: 'auto' }} onClick={confirmDeleteChat}>Delete forever</button>
+              <button className="btn-secondary" onClick={() => setDeletingChat(null)}>{tr.cancel}</button>
+              <button className="btn-danger" style={{ width: 'auto' }} onClick={confirmDeleteChat}>{tr.deleteForever}</button>
             </div>
           </div>
         </div>

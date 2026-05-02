@@ -1,7 +1,26 @@
-import { useState, useRef, useEffect } from 'react'
+import { useEffect, useState, useRef } from 'react'
+import { useAppContext } from '../context/AppContext'
 
 export default function Message({ message, isOwn, onDelete }) {
+  const { tr } = useAppContext()
   const [showMenu, setShowMenu] = useState(false)
+  const closeMenuTimerRef = useRef(null)
+
+  const clearCloseMenuTimer = () => {
+    if (!closeMenuTimerRef.current) return
+    clearTimeout(closeMenuTimerRef.current)
+    closeMenuTimerRef.current = null
+  }
+
+  const scheduleCloseMenu = () => {
+    clearCloseMenuTimer()
+    closeMenuTimerRef.current = setTimeout(() => {
+      setShowMenu(false)
+      closeMenuTimerRef.current = null
+    }, 1500)
+  }
+
+  useEffect(() => clearCloseMenuTimer, [])
 
   const time = message.timestamp
     ? message.timestamp.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -12,46 +31,47 @@ export default function Message({ message, isOwn, onDelete }) {
   return (
     <div
       className={`msg-wrapper ${isOwn ? 'msg-own' : 'msg-other'}`}
-      onMouseLeave={() => setShowMenu(false)}
+      onMouseEnter={clearCloseMenuTimer}
+      onMouseLeave={scheduleCloseMenu}
     >
       <div className={`msg-bubble ${isOwn ? 'bubble-sent' : 'bubble-received'}`}>
         {type === 'text' && <span className="msg-text">{message.text}</span>}
-        {type === 'image' && <ImageMessage url={message.url} />}
+        {type === 'image' && <ImageMessage url={message.url} tr={tr} />}
         {type === 'voice' && <VoiceMessage url={message.url} duration={message.duration} />}
         {type === 'document' && (
-          <DocumentMessage url={message.url} name={message.fileName} size={message.fileSize} />
+          <DocumentMessage url={message.url} name={message.fileName} size={message.fileSize} tr={tr} />
         )}
 
         <div className="msg-meta">
           <span className="msg-time">{time}</span>
-          {isOwn && <Ticks status={message.status} />}
+          {isOwn && <Ticks status={message.status} tr={tr} />}
         </div>
 
         {showMenu && (
-          <div className="msg-menu">
-            <button onClick={() => { onDelete(); setShowMenu(false) }}>
-              Delete for me
+          <div className="msg-menu" onMouseEnter={clearCloseMenuTimer} onMouseLeave={scheduleCloseMenu}>
+            <button onClick={() => { clearCloseMenuTimer(); onDelete(); setShowMenu(false) }}>
+              {tr.deleteForMe}
             </button>
           </div>
         )}
       </div>
 
-      <button className="msg-options" onClick={() => setShowMenu(v => !v)}>▾</button>
+      <button className="msg-options" onClick={() => { clearCloseMenuTimer(); setShowMenu(v => !v) }}>▾</button>
     </div>
   )
 }
 
-function Ticks({ status }) {
-  if (status === 'read')      return <span className="ticks ticks-read"      title="Read">✓✓</span>
-  if (status === 'delivered') return <span className="ticks ticks-delivered" title="Delivered">✓✓</span>
-  return <span className="ticks ticks-sent" title="Sent">✓</span>
+function Ticks({ status, tr }) {
+  if (status === 'read')      return <span className="ticks ticks-read"      title={tr.read}>✓✓</span>
+  if (status === 'delivered') return <span className="ticks ticks-delivered" title={tr.delivered}>✓✓</span>
+  return <span className="ticks ticks-sent" title={tr.sent}>✓</span>
 }
 
-function ImageMessage({ url }) {
+function ImageMessage({ url, tr }) {
   const [open, setOpen] = useState(false)
   return (
     <>
-      <img src={url} className="msg-image" onClick={() => setOpen(true)} alt="Sent image" />
+      <img src={url} className="msg-image" onClick={() => setOpen(true)} alt={tr.sentImage} />
       {open && (
         <div
           style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.9)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 200, cursor: 'pointer' }}
@@ -113,7 +133,7 @@ function VoiceMessage({ url, duration }) {
   )
 }
 
-function DocumentMessage({ url, name, size }) {
+function DocumentMessage({ url, name, size, tr }) {
   const fmtSize = b => {
     if (!b) return ''
     if (b < 1024) return `${b} B`
@@ -128,11 +148,11 @@ function DocumentMessage({ url, name, size }) {
         </svg>
       </div>
       <div className="doc-info">
-        <div className="doc-name">{name || 'Document'}</div>
+        <div className="doc-name">{name || tr.documentLabel}</div>
         {size && <div className="doc-size">{fmtSize(size)}</div>}
       </div>
       <a href={url} target="_blank" rel="noopener noreferrer" className="doc-download" download={name}>
-        ↓ Download
+        {tr.download}
       </a>
     </div>
   )

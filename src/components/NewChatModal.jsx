@@ -1,6 +1,8 @@
 import { useState } from 'react'
+import { useAppContext } from '../context/AppContext'
 
 export default function NewChatModal({ onClose, onCreate }) {
+  const { tr } = useAppContext()
   const [phone, setPhone] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -18,17 +20,17 @@ export default function NewChatModal({ onClose, onCreate }) {
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
-          <h2>New Chat</h2>
+          <h2>{tr.newChat}</h2>
           <button className="icon-btn" onClick={onClose}>✕</button>
         </div>
         <form onSubmit={handleSubmit}>
           <div className="field">
-            <label>Enter the person's phone number</label>
+            <label>{tr.newChatPhoneLabel}</label>
             <input
               type="text"
               value={phone}
               onChange={e => setPhone(e.target.value)}
-              placeholder="e.g. 0987654321"
+              placeholder={tr.newChatPhonePlaceholder}
               autoFocus
               required
             />
@@ -36,10 +38,10 @@ export default function NewChatModal({ onClose, onCreate }) {
           {error && <div className="error-banner">{error}</div>}
           <div className="modal-footer">
             <button type="button" className="btn-secondary" onClick={onClose}>
-              Cancel
+              {tr.cancel}
             </button>
             <button type="submit" className="btn-primary" disabled={loading}>
-              {loading ? 'Searching…' : 'Start Chat'}
+              {loading ? tr.searching : tr.startChat}
             </button>
           </div>
         </form>

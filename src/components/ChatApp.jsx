@@ -1,45 +1,23 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { signOut } from 'firebase/auth'
 import { doc, setDoc, serverTimestamp, collection, getDocs, where, query, writeBatch } from 'firebase/firestore'
 import { auth, db } from '../firebase'
 import Sidebar from './Sidebar'
 import ChatWindow from './ChatWindow'
+import Settings from './Settings'
+import { GtyLogo } from '../App'
 
-export default function ChatApp({ user }) {
-  const [selectedChat, setSelectedChat] = useState(null)
+export default function ChatApp({ user, moderation }) {
+  const [selectedChat, setSelectedChat]   = useState(null)
   const [mobileChatOpen, setMobileChatOpen] = useState(false)
+  const [showSettings, setShowSettings]   = useState(false)
 
-  useEffect(() => {
-    setDoc(doc(db, 'status', user.uid), {
-      online: true,
-      activeChat: null,
-      lastSeen: serverTimestamp(),
-    })
-    markDelivered()
-
-    const handleUnload = () => {
-      setDoc(doc(db, 'status', user.uid), {
-        online: false,
-        activeChat: null,
-        lastSeen: serverTimestamp(),
-      })
-    }
-    window.addEventListener('beforeunload', handleUnload)
-    return () => {
-      window.removeEventListener('beforeunload', handleUnload)
-      handleUnload()
-    }
-  }, [user.uid])
-
-  const markDelivered = async () => {
+  const markDelivered = useCallback(async () => {
     try {
-      const chatsSnap = await getDocs(
-        query(collection(db, 'chats'), where('participants', 'array-contains', user.uid))
-      )
+      const chatsSnap = await getDocs(query(collection(db, 'chats'), where('participants', 'array-contains', user.uid)))
       for (const chatDoc of chatsSnap.docs) {
         const msgsSnap = await getDocs(collection(db, 'chats', chatDoc.id, 'messages'))
-        const batch = writeBatch(db)
-        let hasWork = false
+        const batch = writeBatch(db); let hasWork = false
         msgsSnap.docs.forEach(d => {
           if (d.data().senderId !== user.uid && d.data().status === 'sent') {
             batch.update(doc(db, 'chats', chatDoc.id, 'messages', d.id), { status: 'delivered' })
@@ -49,32 +27,33 @@ export default function ChatApp({ user }) {
         if (hasWork) await batch.commit()
       }
     } catch { /* non-critical */ }
-  }
+  }, [user.uid])
+
+  useEffect(() => {
+    setDoc(doc(db, 'status', user.uid), { online: true, activeChat: null, lastSeen: serverTimestamp() })
+    markDelivered()
+    const handleUnload = () => setDoc(doc(db, 'status', user.uid), { online: false, activeChat: null, lastSeen: serverTimestamp() })
+    window.addEventListener('beforeunload', handleUnload)
+    return () => { window.removeEventListener('beforeunload', handleUnload); handleUnload() }
+  }, [markDelivered, user.uid])
 
   const handleLogout = async () => {
-    await setDoc(doc(db, 'status', user.uid), {
-      online: false, activeChat: null, lastSeen: serverTimestamp(),
-    })
+    await setDoc(doc(db, 'status', user.uid), { online: false, activeChat: null, lastSeen: serverTimestamp() })
     await signOut(auth)
   }
 
-  const handleSelectChat = chat => {
-    setSelectedChat(chat)
-    setMobileChatOpen(true)
-  }
-
-  const handleBackToList = () => {
-    setMobileChatOpen(false)
-  }
+  const handleSelectChat = chat => { setSelectedChat(chat); setMobileChatOpen(true) }
 
   return (
     <div className="chat-app">
       <div className={`sidebar ${mobileChatOpen ? 'mobile-hidden' : ''}`}>
         <Sidebar
+          key={user.uid}
           user={user}
           selectedChat={selectedChat}
           onSelectChat={handleSelectChat}
           onLogout={handleLogout}
+          onSettings={() => setShowSettings(true)}
         />
       </div>
 
@@ -84,21 +63,20 @@ export default function ChatApp({ user }) {
             key={selectedChat.id}
             chat={selectedChat}
             currentUser={user}
-            onBack={handleBackToList}
+            moderation={moderation}
+            onBack={() => setMobileChatOpen(false)}
           />
         ) : (
           <div className="welcome-screen">
             <div className="welcome-inner">
-              <svg viewBox="0 0 100 100" width="90" height="90" xmlns="http://www.w3.org/2000/svg" opacity="0.18">
-                <polygon points="50,4 93,27 93,73 50,96 7,73 7,27" fill="none" stroke="var(--accent)" strokeWidth="3.5" strokeLinejoin="round" />
-                <text x="51" y="68" textAnchor="middle" fontSize="46" fontFamily="Syne,sans-serif" fontWeight="800" fill="var(--accent)">G</text>
-              </svg>
+              <GtyLogo size={90} />
               <h2>GtyChat</h2>
-              <p>Select a chat or start a new one.</p>
             </div>
           </div>
         )}
       </div>
+
+      {showSettings && <Settings user={user} onClose={() => setShowSettings(false)} />}
     </div>
   )
 }

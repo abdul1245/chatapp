@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
 import { GtyLogo } from '../App'
+import { useAppContext } from '../context/AppContext'
 
 export default function BannedScreen({ moderation, onExpire, onLogout }) {
+  const { tr } = useAppContext()
   const [timeLeft, setTimeLeft] = useState(null)
 
   useEffect(() => {
@@ -35,17 +37,17 @@ export default function BannedScreen({ moderation, onExpire, onLogout }) {
         <GtyLogo size={56} />
         <div className="banned-icon">{isBan ? '🚫' : '⏳'}</div>
         <div className="banned-title">
-          {isBan ? 'You are banned' : 'You are timed out'}
+          {isBan ? tr.bannedTitle : tr.timedOutTitle}
         </div>
         <div className="banned-desc">
           {moderation.reason
-            ? <>Reason: <strong>{moderation.reason}</strong><br /></>
+            ? <>{tr.reason}: <strong>{moderation.reason}</strong><br /></>
             : null}
           {isBan && !moderation.until
-            ? 'This ban is permanent. Contact the administrator.'
+            ? tr.permanentBan
             : isBan
-            ? 'This ban will lift when the timer expires.'
-            : 'You cannot send or receive messages until the timeout expires.'}
+            ? tr.banTimer
+            : tr.timeoutDesc}
         </div>
 
         {moderation.until && timeLeft !== null && (
@@ -53,7 +55,7 @@ export default function BannedScreen({ moderation, onExpire, onLogout }) {
         )}
 
         <button className="btn-secondary banned-logout" onClick={onLogout}>
-          Sign out
+          {tr.logout}
         </button>
       </div>
     </div>
