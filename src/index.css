@@ -2022,28 +2022,26 @@ body {
     max-height: calc(100dvh - 20px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
     padding: 16px;
     gap: 12px;
-    overflow-y: auto;
+    overflow: hidden;
     align-self: flex-start;
     margin-top: env(safe-area-inset-top, 0px);
   }
 
   .settings-modal .modal-header,
   .settings-modal .settings-tabs {
-    position: sticky;
+    position: static;
+    flex: 0 0 auto;
     z-index: 5;
     background: var(--bg-3);
   }
 
   .settings-modal .modal-header {
-    top: 0;
     padding-bottom: 8px;
   }
 
   .settings-modal .settings-tabs {
-    top: 52px;
     margin: 0 -2px 4px;
-    overflow-x: auto;
-    scrollbar-width: none;
+    overflow: visible;
   }
 
   .settings-modal .settings-tabs::-webkit-scrollbar {
@@ -2051,12 +2049,17 @@ body {
   }
 
   .settings-modal .admin-tab {
-    flex: 1 0 142px;
+    flex: 1 1 0;
+    min-width: 0;
     min-height: 38px;
     white-space: nowrap;
   }
 
-  .settings-content {
+  .settings-modal .settings-content {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
     padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
   }
 }
