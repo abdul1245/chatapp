@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useState, useEffect, useMemo, useRef } from 'react'
 import {
   collection, query, orderBy, onSnapshot,
   addDoc, serverTimestamp, doc, updateDoc, setDoc, getDoc, writeBatch,
@@ -15,17 +15,21 @@ export default function ChatWindow({ chat, currentUser, moderation, onBack }) {
   const [text, setText]               = useState('')
   const [editingName, setEditingName] = useState(false)
   const [otherProfile, setOtherProfile] = useState(null)
-  const suggestedContactName = useMemo(() => {
-    return buildDisplayName(otherProfile) || chat.otherName || chat.otherPhone
-  }, [chat.otherName, chat.otherPhone, otherProfile])
-  const initialContactName = useMemo(() => {
+  const getContactNameState = useCallback(profile => {
+    const suggested = buildDisplayName(profile) || chat.otherName || chat.otherPhone
     try {
       const names = JSON.parse(localStorage.getItem(`contactNames_${currentUser.uid}`) || '{}')
-      return String(names[chat.otherId] || '').trim() || suggestedContactName
+      return {
+        suggested,
+        initial: String(names[chat.otherId] || '').trim() || suggested,
+      }
     } catch {
-      return suggestedContactName
+      return { suggested, initial: suggested }
     }
-  }, [chat.otherId, currentUser.uid, suggestedContactName])
+  }, [chat.otherId, chat.otherName, chat.otherPhone, currentUser.uid])
+  const { suggested: suggestedContactName, initial: initialContactName } = useMemo(() => {
+    return getContactNameState(otherProfile)
+  }, [getContactNameState, otherProfile])
   const [contactName, setContactName] = useState(initialContactName)
   const [tempName, setTempName]       = useState(initialContactName)
   const [otherPhoto, setOtherPhoto]   = useState(null)
@@ -44,20 +48,18 @@ export default function ChatWindow({ chat, currentUser, moderation, onBack }) {
   const chunksRef    = useRef([])
   const isTimedOut = moderation?.type === 'timeout'
 
-  useEffect(() => {
-    setContactName(initialContactName)
-    setTempName(initialContactName)
-  }, [initialContactName])
-
   // Load contact profile
   useEffect(() => {
     const unsub = onSnapshot(doc(db, 'users', chat.otherId), snap => {
       const data = snap.exists() ? snap.data() : null
       setOtherProfile(data)
       setOtherPhoto(data?.photoURL || null)
+      const nextName = getContactNameState(data).initial
+      setContactName(nextName)
+      setTempName(nextName)
     })
     return unsub
-  }, [chat.otherId])
+  }, [chat.otherId, getContactNameState])
 
   // Mark this chat as open in the status doc
   useEffect(() => {
@@ -94,8 +96,16 @@ export default function ChatWindow({ chat, currentUser, moderation, onBack }) {
   }, [chat.id, currentUser.uid])
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+    const frame = requestAnimationFrame(() => {
+      const prefersReducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+      const isMobile = window.matchMedia?.('(max-width: 768px), (pointer: coarse)').matches
+      bottomRef.current?.scrollIntoView({
+        behavior: prefersReducedMotion || isMobile ? 'auto' : 'smooth',
+        block: 'end',
+      })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [messages.length])
 
   // Send text message
   const sendMessage = async () => {
