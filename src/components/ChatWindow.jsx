@@ -2,7 +2,7 @@ import { useCallback, useState, useEffect, useMemo, useRef } from 'react'
 import {
   collection, query, orderBy, onSnapshot,
   addDoc, serverTimestamp, doc, updateDoc, setDoc, getDoc, writeBatch,
-  arrayUnion,
+  arrayUnion, arrayRemove,
 } from 'firebase/firestore'
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage'
 import { db, storage } from '../firebase'
@@ -125,6 +125,13 @@ export default function ChatWindow({ chat, currentUser, moderation, onBack, onSt
   }, [messages.length])
 
   // Send text message
+  const publishChatMessage = async lastMessage => {
+    await updateDoc(doc(db, 'chats', chat.id), {
+      lastMessage,
+      hiddenFor: arrayRemove(currentUser.uid, chat.otherId),
+    })
+  }
+
   const sendMessage = async () => {
     if (isTimedOut) return
     if (!text.trim()) return
@@ -137,9 +144,7 @@ export default function ChatWindow({ chat, currentUser, moderation, onBack, onSt
       timestamp: serverTimestamp(),
       status: 'sent',
     })
-    await updateDoc(doc(db, 'chats', chat.id), {
-      lastMessage: { text: trimmed, type: 'text', timestamp: serverTimestamp(), senderId: currentUser.uid },
-    })
+    await publishChatMessage({ text: trimmed, type: 'text', timestamp: serverTimestamp(), senderId: currentUser.uid })
     upgradeStatus(msgRef.id)
   }
 
@@ -184,9 +189,7 @@ export default function ChatWindow({ chat, currentUser, moderation, onBack, onSt
       timestamp: serverTimestamp(),
       status: 'sent',
     })
-    await updateDoc(doc(db, 'chats', chat.id), {
-      lastMessage: { type, timestamp: serverTimestamp(), senderId: currentUser.uid },
-    })
+    await publishChatMessage({ type, timestamp: serverTimestamp(), senderId: currentUser.uid })
     upgradeStatus(msgRef.id)
   } catch (err) {
     console.error('File upload error:', err)
@@ -245,9 +248,7 @@ export default function ChatWindow({ chat, currentUser, moderation, onBack, onSt
       timestamp: serverTimestamp(),
       status: 'sent',
     })
-    await updateDoc(doc(db, 'chats', chat.id), {
-      lastMessage: { type: 'voice', timestamp: serverTimestamp(), senderId: currentUser.uid },
-    })
+    await publishChatMessage({ type: 'voice', timestamp: serverTimestamp(), senderId: currentUser.uid })
     upgradeStatus(msgRef.id)
   } catch (err) {
     console.error('Voice upload error:', err)

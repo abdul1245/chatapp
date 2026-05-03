@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import {
   collection, query, where, onSnapshot,
   doc, getDoc, getDocs, addDoc, serverTimestamp, updateDoc,
-  arrayUnion, arrayRemove,
+  arrayUnion, arrayRemove, writeBatch,
 } from 'firebase/firestore'
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage'
 import { db, storage } from '../firebase'
@@ -28,6 +28,29 @@ const getStoredHiddenChats = uid => {
 
 const chatIsHiddenForUser = (chat, uid, localHiddenIds) => {
   return localHiddenIds.includes(chat.id) || chat.hiddenFor?.includes(uid)
+}
+
+const deleteChatWithMessages = async chatId => {
+  const messagesSnap = await getDocs(collection(db, 'chats', chatId, 'messages'))
+  let batch = writeBatch(db)
+  let pendingWrites = 0
+
+  const commitIfNeeded = async force => {
+    if (!pendingWrites || (!force && pendingWrites < 450)) return
+    await batch.commit()
+    batch = writeBatch(db)
+    pendingWrites = 0
+  }
+
+  for (const messageDoc of messagesSnap.docs) {
+    batch.delete(messageDoc.ref)
+    pendingWrites += 1
+    await commitIfNeeded(false)
+  }
+
+  batch.delete(doc(db, 'chats', chatId))
+  pendingWrites += 1
+  await commitIfNeeded(true)
 }
 
 export default function Sidebar({ user, selectedChat, onSelectChat, onLogout, onSettings }) {
@@ -165,6 +188,7 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout, on
     }
     const chatRef = await addDoc(collection(db, 'chats'), {
       participants: [user.uid, otherId],
+      hiddenFor: [otherId],
       createdAt: serverTimestamp(),
       lastMessage: null,
     })
@@ -183,15 +207,15 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout, on
   const confirmDeleteChat = async () => {
     if (!deletingChat) return
     const chatToDelete = deletingChat
-    const nextHidden = [...new Set([...hiddenChats, chatToDelete.id])]
-    setHiddenChats(nextHidden)
-    setChats(prev => prev.filter(chat => chat.id !== chatToDelete.id))
-    localStorage.setItem(`hiddenChats_${user.uid}`, JSON.stringify(nextHidden))
-    localStorage.removeItem(`del_${user.uid}_${chatToDelete.id}`)
-    if (selectedChat?.id === chatToDelete.id) onSelectChat(null)
-    setDeletingChat(null)
     try {
-      await updateDoc(doc(db, 'chats', chatToDelete.id), { hiddenFor: arrayUnion(user.uid) })
+      await deleteChatWithMessages(chatToDelete.id)
+      const nextHidden = hiddenChats.filter(id => id !== chatToDelete.id)
+      setHiddenChats(nextHidden)
+      setChats(prev => prev.filter(chat => chat.id !== chatToDelete.id))
+      localStorage.setItem(`hiddenChats_${user.uid}`, JSON.stringify(nextHidden))
+      localStorage.removeItem(`del_${user.uid}_${chatToDelete.id}`)
+      if (selectedChat?.id === chatToDelete.id) onSelectChat(null)
+      setDeletingChat(null)
     } catch (err) {
       alert(`${tr.deleteChat}: ${err.message}`)
     }
