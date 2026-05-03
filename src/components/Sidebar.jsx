@@ -27,10 +27,15 @@ const getStoredHiddenChats = uid => {
 }
 
 const chatIsHiddenForUser = (chat, uid, localHiddenIds) => {
-  return localHiddenIds.includes(chat.id) || chat.hiddenFor?.includes(uid)
+  if (chat.hiddenFor?.includes(uid)) return true
+
+  // Local hidden ids are only a fallback while the Firestore clear is syncing.
+  // Once a chat has a persisted message and is not hidden for this user,
+  // Firestore is the source of truth so incoming messages can reopen the chat.
+  return localHiddenIds.includes(chat.id) && !chat.lastMessage
 }
 
-const deleteChatWithMessages = async chatId => {
+const clearChatForUser = async (chatId, uid) => {
   const messagesSnap = await getDocs(collection(db, 'chats', chatId, 'messages'))
   let batch = writeBatch(db)
   let pendingWrites = 0
@@ -43,12 +48,15 @@ const deleteChatWithMessages = async chatId => {
   }
 
   for (const messageDoc of messagesSnap.docs) {
-    batch.delete(messageDoc.ref)
+    batch.update(messageDoc.ref, { deletedFor: arrayUnion(uid) })
     pendingWrites += 1
     await commitIfNeeded(false)
   }
 
-  batch.delete(doc(db, 'chats', chatId))
+  batch.update(doc(db, 'chats', chatId), {
+    hiddenFor: arrayUnion(uid),
+    clearedFor: arrayUnion(uid),
+  })
   pendingWrites += 1
   await commitIfNeeded(true)
 }
@@ -80,6 +88,14 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout, on
       const localHiddenIds = getStoredHiddenChats(user.uid)
       const rawChats = snap.docs.map(d => ({ id: d.id, ...d.data() }))
       const visibleRawChats = rawChats.filter(chat => !chatIsHiddenForUser(chat, user.uid, localHiddenIds))
+      const staleHiddenIds = localHiddenIds.filter(chatId => {
+        const chat = rawChats.find(rawChat => rawChat.id === chatId)
+        return !chat || chatIsHiddenForUser(chat, user.uid, localHiddenIds)
+      })
+      if (staleHiddenIds.length !== localHiddenIds.length) {
+        setHiddenChats(staleHiddenIds)
+        localStorage.setItem(`hiddenChats_${user.uid}`, JSON.stringify(staleHiddenIds))
+      }
       const visibleIds = new Set(visibleRawChats.map(chat => chat.id))
       setChats(prev => prev.filter(chat => visibleIds.has(chat.id)))
 
@@ -158,6 +174,22 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout, on
     return d.toLocaleDateString([], { day: '2-digit', month: '2-digit' })
   }
 
+  const getChatPreview = chat => {
+    if (chat.clearedFor?.includes(user.uid)) return tr.noMessagesYet
+    if (chat.lastMessage?.type === 'call' && chat.lastMessage.text) {
+      return chat.lastMessage.text.length > 36
+        ? `${chat.lastMessage.text.slice(0, 36)}...`
+        : chat.lastMessage.text
+    }
+    if (chat.lastMessage?.type && chat.lastMessage.type !== 'text') {
+      return { image: tr.photo, voice: tr.voiceMessage, document: tr.document }[chat.lastMessage.type] || '...'
+    }
+    if (!chat.lastMessage?.text) return tr.noMessagesYet
+    return chat.lastMessage.text.length > 36
+      ? `${chat.lastMessage.text.slice(0, 36)}...`
+      : chat.lastMessage.text
+  }
+
   const handleCreate = async phone => {
     const trimmed = phone.trim()
     const snap = await getDocs(query(collection(db, 'users'), where('phoneNumber', '==', trimmed)))
@@ -175,9 +207,13 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout, on
         setHiddenChats(nextHidden)
         localStorage.setItem(`hiddenChats_${user.uid}`, JSON.stringify(nextHidden))
       }
+      const visibleData = {
+        ...data,
+        hiddenFor: data.hiddenFor?.filter(id => id !== user.uid) || [],
+      }
       onSelectChat({
         id: existingDoc.id,
-        ...data,
+        ...visibleData,
         otherId,
         otherName: buildDisplayName(otherDoc.data()),
         otherPhone: otherDoc.data().phoneNumber,
@@ -207,15 +243,15 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout, on
   const confirmDeleteChat = async () => {
     if (!deletingChat) return
     const chatToDelete = deletingChat
+    const nextHidden = [...new Set([...hiddenChats, chatToDelete.id])]
+    setHiddenChats(nextHidden)
+    setChats(prev => prev.filter(chat => chat.id !== chatToDelete.id))
+    localStorage.setItem(`hiddenChats_${user.uid}`, JSON.stringify(nextHidden))
+    localStorage.removeItem(`del_${user.uid}_${chatToDelete.id}`)
+    if (selectedChat?.id === chatToDelete.id) onSelectChat(null)
+    setDeletingChat(null)
     try {
-      await deleteChatWithMessages(chatToDelete.id)
-      const nextHidden = hiddenChats.filter(id => id !== chatToDelete.id)
-      setHiddenChats(nextHidden)
-      setChats(prev => prev.filter(chat => chat.id !== chatToDelete.id))
-      localStorage.setItem(`hiddenChats_${user.uid}`, JSON.stringify(nextHidden))
-      localStorage.removeItem(`del_${user.uid}_${chatToDelete.id}`)
-      if (selectedChat?.id === chatToDelete.id) onSelectChat(null)
-      setDeletingChat(null)
+      await clearChatForUser(chatToDelete.id, user.uid)
     } catch (err) {
       alert(`${tr.deleteChat}: ${err.message}`)
     }
@@ -295,13 +331,7 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout, on
                 <span className="chat-row-time">{formatTime(chat.lastMessage?.timestamp)}</span>
               </div>
               <div className="chat-row-preview">
-                {chat.lastMessage?.type && chat.lastMessage.type !== 'text'
-                  ? { image: tr.photo, voice: tr.voiceMessage, document: tr.document }[chat.lastMessage.type] || '...'
-                  : chat.lastMessage?.text
-                    ? chat.lastMessage.text.length > 36
-                      ? chat.lastMessage.text.slice(0, 36) + '...'
-                      : chat.lastMessage.text
-                    : tr.noMessagesYet}
+                {getChatPreview(chat)}
               </div>
             </div>
             <button

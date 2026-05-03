@@ -129,6 +129,7 @@ export default function ChatWindow({ chat, currentUser, moderation, onBack, onSt
     await updateDoc(doc(db, 'chats', chat.id), {
       lastMessage,
       hiddenFor: arrayRemove(currentUser.uid, chat.otherId),
+      clearedFor: arrayRemove(currentUser.uid, chat.otherId),
     })
   }
 

@@ -36,6 +36,7 @@ export default function Message({ message, isOwn, onDelete }) {
     >
       <div className={`msg-bubble ${isOwn ? 'bubble-sent' : 'bubble-received'}`}>
         {type === 'text' && <span className="msg-text">{message.text}</span>}
+        {type === 'call' && <CallMessage message={message} />}
         {type === 'image' && <ImageMessage url={message.url} tr={tr} />}
         {type === 'voice' && <VoiceMessage url={message.url} duration={message.duration} />}
         {type === 'document' && (
@@ -65,6 +66,26 @@ function Ticks({ status, tr }) {
   if (status === 'read')      return <span className="ticks ticks-read"      title={tr.read}>✓✓</span>
   if (status === 'delivered') return <span className="ticks ticks-delivered" title={tr.delivered}>✓✓</span>
   return <span className="ticks ticks-sent" title={tr.sent}>✓</span>
+}
+
+function CallMessage({ message }) {
+  const isVideo = message.callType === 'video'
+  return (
+    <span className="msg-call">
+      <span className="msg-call-icon" aria-hidden="true">
+        {isVideo ? (
+          <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+            <path d="M17 10.5V6c0-1.1-.9-2-2-2H5C3.9 4 3 4.9 3 6v12c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2v-4.5l4 4v-11l-4 4z" />
+          </svg>
+        ) : (
+          <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+            <path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1C10.61 21 3 13.39 3 4c0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.24.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z" />
+          </svg>
+        )}
+      </span>
+      <span className="msg-call-text">{message.text}</span>
+    </span>
+  )
 }
 
 function ImageMessage({ url, tr }) {
