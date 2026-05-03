@@ -22,7 +22,7 @@ const isDeletedForUser = (message, uid, localDeletedIds) => {
   return localDeletedIds.includes(message.id) || message.deletedFor?.includes(uid)
 }
 
-export default function ChatWindow({ chat, currentUser, moderation, onBack }) {
+export default function ChatWindow({ chat, currentUser, moderation, onBack, onStartCall }) {
   const { tr } = useAppContext()
   const [messages, setMessages]       = useState([])
   const [text, setText]               = useState('')
@@ -334,6 +334,29 @@ export default function ChatWindow({ chat, currentUser, moderation, onBack }) {
             </div>
           )}
           <div className="contact-subline">{chat.otherPhone}</div>
+        </div>
+
+        <div className="chat-call-actions">
+          <button
+            className="icon-btn"
+            title={tr.voiceCall || 'Voice call'}
+            onClick={() => onStartCall?.(chat, 'voice')}
+            disabled={isTimedOut}
+          >
+            <svg viewBox="0 0 24 24" fill="currentColor" width="19" height="19">
+              <path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1C10.61 21 3 13.39 3 4c0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.24.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z" />
+            </svg>
+          </button>
+          <button
+            className="icon-btn"
+            title={tr.videoCall || 'Video call'}
+            onClick={() => onStartCall?.(chat, 'video')}
+            disabled={isTimedOut}
+          >
+            <svg viewBox="0 0 24 24" fill="currentColor" width="21" height="21">
+              <path d="M17 10.5V6c0-1.1-.9-2-2-2H5C3.9 4 3 4.9 3 6v12c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2v-4.5l4 4v-11l-4 4z" />
+            </svg>
+          </button>
         </div>
       </div>
 

@@ -5,12 +5,14 @@ import { auth, db } from '../firebase'
 import Sidebar from './Sidebar'
 import ChatWindow from './ChatWindow'
 import Settings from './Settings'
+import CallManager from './CallManager'
 import { GtyLogo } from '../App'
 
 export default function ChatApp({ user, moderation }) {
   const [selectedChat, setSelectedChat]   = useState(null)
   const [mobileChatOpen, setMobileChatOpen] = useState(false)
   const [showSettings, setShowSettings]   = useState(false)
+  const [callRequest, setCallRequest]     = useState(null)
 
   const markDelivered = useCallback(async () => {
     try {
@@ -68,6 +70,7 @@ export default function ChatApp({ user, moderation }) {
             currentUser={user}
             moderation={moderation}
             onBack={() => setMobileChatOpen(false)}
+            onStartCall={(chat, type) => setCallRequest({ chat, type, id: Date.now() })}
           />
         ) : (
           <div className="welcome-screen">
@@ -80,6 +83,7 @@ export default function ChatApp({ user, moderation }) {
       </div>
 
       {showSettings && <Settings user={user} onClose={() => setShowSettings(false)} />}
+      <CallManager user={user} request={callRequest} />
     </div>
   )
 }
