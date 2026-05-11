@@ -1,9 +1,12 @@
 import { useEffect, useState, useRef } from 'react'
 import { useAppContext } from '../context/AppContext'
 
-export default function Message({ message, isOwn, onDelete }) {
+export default function Message({ message, isOwn, onDelete, onDeleteForEveryone, canDeleteForEveryone }) {
   const { tr } = useAppContext()
+  const text = (key, values = {}) =>
+    Object.entries(values).reduce((out, [name, value]) => out.replace(`{${name}}`, value), tr[key] || '')
   const [showMenu, setShowMenu] = useState(false)
+  const [confirmDeleteEveryone, setConfirmDeleteEveryone] = useState(false)
   const closeMenuTimerRef = useRef(null)
 
   const clearCloseMenuTimer = () => {
@@ -27,6 +30,10 @@ export default function Message({ message, isOwn, onDelete }) {
     : ''
 
   const type = message.type || 'text'
+  const isDeletedForEveryone = Boolean(message.deletedForEveryone)
+  const deletedNotice = isOwn
+    ? tr.deletedForEveryoneByYou
+    : text('deletedForEveryoneByUser', { name: message.deletedForEveryoneByName || tr.thisUser })
 
   return (
     <div
@@ -34,13 +41,19 @@ export default function Message({ message, isOwn, onDelete }) {
       onMouseEnter={clearCloseMenuTimer}
       onMouseLeave={scheduleCloseMenu}
     >
-      <div className={`msg-bubble ${isOwn ? 'bubble-sent' : 'bubble-received'}`}>
-        {type === 'text' && <span className="msg-text">{message.text}</span>}
-        {type === 'call' && <CallMessage message={message} />}
-        {type === 'image' && <ImageMessage url={message.url} tr={tr} />}
-        {type === 'voice' && <VoiceMessage url={message.url} duration={message.duration} />}
-        {type === 'document' && (
-          <DocumentMessage url={message.url} name={message.fileName} size={message.fileSize} tr={tr} />
+      <div className={`msg-bubble ${isOwn ? 'bubble-sent' : 'bubble-received'} ${isDeletedForEveryone ? 'bubble-system-deleted' : ''}`}>
+        {isDeletedForEveryone ? (
+          <span className="msg-deleted-notice">{deletedNotice}</span>
+        ) : (
+          <>
+            {type === 'text' && <span className="msg-text">{message.text}</span>}
+            {type === 'call' && <CallMessage message={message} tr={tr} />}
+            {type === 'image' && <ImageMessage url={message.url} tr={tr} />}
+            {type === 'voice' && <VoiceMessage url={message.url} duration={message.duration} />}
+            {type === 'document' && (
+              <DocumentMessage url={message.url} name={message.fileName} size={message.fileSize} tr={tr} />
+            )}
+          </>
         )}
 
         <div className="msg-meta">
@@ -48,16 +61,49 @@ export default function Message({ message, isOwn, onDelete }) {
           {isOwn && <Ticks status={message.status} tr={tr} />}
         </div>
 
-        {showMenu && (
-          <div className="msg-menu" onMouseEnter={clearCloseMenuTimer} onMouseLeave={scheduleCloseMenu}>
-            <button onClick={() => { clearCloseMenuTimer(); onDelete(); setShowMenu(false) }}>
-              {tr.deleteForMe}
-            </button>
-          </div>
-        )}
       </div>
 
       <button className="msg-options" onClick={() => { clearCloseMenuTimer(); setShowMenu(v => !v) }}>▾</button>
+      {showMenu && (
+        <div className="msg-menu" onMouseEnter={clearCloseMenuTimer} onMouseLeave={scheduleCloseMenu}>
+          <button onClick={() => { clearCloseMenuTimer(); onDelete(); setShowMenu(false) }}>
+            {tr.deleteForMe}
+          </button>
+          {canDeleteForEveryone && (
+            <button
+              className="msg-menu-danger"
+              onClick={() => {
+                clearCloseMenuTimer()
+                setShowMenu(false)
+                setConfirmDeleteEveryone(true)
+              }}
+            >
+              {tr.deleteForEveryone}
+            </button>
+          )}
+        </div>
+      )}
+
+      {confirmDeleteEveryone && (
+        <div className="profile-confirm-overlay" onClick={() => setConfirmDeleteEveryone(false)}>
+          <div className="profile-confirm-card" onClick={e => e.stopPropagation()}>
+            <h3>{tr.deleteForEveryoneTitle}</h3>
+            <p>{tr.deleteForEveryoneWarn}</p>
+            <div className="profile-confirm-actions">
+              <button className="btn-secondary" onClick={() => setConfirmDeleteEveryone(false)}>{tr.cancel}</button>
+              <button
+                className="btn-danger"
+                onClick={() => {
+                  onDeleteForEveryone()
+                  setConfirmDeleteEveryone(false)
+                }}
+              >
+                {tr.deleteForEveryone}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -68,8 +114,28 @@ function Ticks({ status, tr }) {
   return <span className="ticks ticks-sent" title={tr.sent}>✓</span>
 }
 
-function CallMessage({ message }) {
+function CallMessage({ message, tr }) {
   const isVideo = message.callType === 'video'
+  const text = (key, values = {}) =>
+    Object.entries(values).reduce((out, [name, value]) => out.replace(`{${name}}`, value), tr[key] || '')
+  const statusLabel = {
+    ringing: tr.callStatusRinging,
+    accepted: tr.callStatusAccepted,
+    declined: tr.callStatusDeclined,
+    canceled: tr.callStatusCanceled,
+    unanswered: tr.callStatusUnanswered,
+    ended: tr.callStatusAcceptedEnded,
+    failed: tr.callStatusFailed,
+    left: tr.callStatusEnded,
+  }[message.callStatus] || message.callStatus
+  const callText = message.callerName || message.receiverName
+    ? text('callMessageText', {
+      caller: message.callerName || tr.unknownUser,
+      receiver: message.receiverName || tr.unknownUser,
+      kind: isVideo ? tr.callKindVideo : tr.callKindVoice,
+      status: statusLabel,
+    })
+    : message.text
   return (
     <span className="msg-call">
       <span className="msg-call-icon" aria-hidden="true">
@@ -83,7 +149,7 @@ function CallMessage({ message }) {
           </svg>
         )}
       </span>
-      <span className="msg-call-text">{message.text}</span>
+      <span className="msg-call-text">{callText}</span>
     </span>
   )
 }

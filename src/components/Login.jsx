@@ -7,19 +7,22 @@ import {
 } from 'firebase/auth'
 import {
   doc, setDoc, getDoc, getDocs, deleteDoc,
-  collection, query, where, serverTimestamp,
+  collection, query, where, serverTimestamp, updateDoc,
 } from 'firebase/firestore'
 import { auth, secondaryAuth, db, secondaryDb } from '../firebase'
 import { sendAccountEmail, sendEmailCode, getErrorMessage } from '../email'
 import { GtyLogo } from '../App'
 import { useAppContext } from '../context/AppContext'
 import { buildBirthday } from '../profile'
+import { maskEmail } from '../privacy'
+import { getDeviceId, getDeviceInfo } from '../deviceSession'
 import PasswordInput from './PasswordInput'
 
 // ── helpers ──────────────────────────────────────────────────
 const genCode  = () => String(Math.floor(10000 + Math.random() * 90000))
 const genPhone = () => String(Math.floor(1000000000 + Math.random() * 9000000000))
 const codeKey  = email => email.replace(/\./g, ',').replace(/@/g, '--at--')
+const activeSessionCodeKey = uid => `${uid}_active_session_login`
 const isSignupPhone = value => /^\d{10}$/.test(value.trim())
 
 const sendAccountEmailQuietly = (...args) =>
@@ -106,7 +109,7 @@ export function LangThemePicker() {
       <button
         className="theme-toggle"
         onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-        title="Toggle theme"
+        title={tr.toggleTheme}
       >
         {theme === 'dark' ? '☀️' : '🌙'}
       </button>
@@ -139,9 +142,14 @@ function CodeStep({ email, expirySec, onVerify, onResend, onChangeEmail, tr, sub
 
   const submit = async () => {
     setLoading(true); setError('')
-    const res = await onVerify(code.trim())
-    if (res?.error) setError(res.error)
-    setLoading(false)
+    try {
+      const res = await onVerify(code.trim())
+      if (res?.error) setError(res.error)
+    } catch (e) {
+      setError(getErrorMessage(e))
+    } finally {
+      setLoading(false)
+    }
   }
 
   const resend = async () => {
@@ -155,7 +163,7 @@ function CodeStep({ email, expirySec, onVerify, onResend, onChangeEmail, tr, sub
       <div className="verify-header">
         <div className="verify-icon">📧</div>
         <p className="verify-title">{tr.verifyEmail}</p>
-        <p className="verify-sub">{tr.codeSentTo} <strong>{email}</strong></p>
+        <p className="verify-sub">{tr.codeSentTo} <strong>{maskEmail(email)}</strong></p>
       </div>
 
       <div className="field">
@@ -202,30 +210,180 @@ function LoginForm({ onForgot, tr }) {
   const [pass, setPass]       = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError]     = useState('')
+  const [conflict, setConflict] = useState(null)
+
+  const getLoginTarget = async trimmed => {
+    if (trimmed.includes('@')) {
+      const snap = await getDocs(query(collection(db, 'users'), where('contactEmail', '==', trimmed)))
+      if (snap.empty) throw new Error(tr.wrongCredentials)
+      const userDoc = snap.docs[0]
+      const userData = userDoc.data()
+      return {
+        uid: userDoc.id,
+        userData,
+        authEmail: userData.authEmail || `${userData.phoneNumber}@chatapp.local`,
+      }
+    }
+
+    const snap = await getDocs(query(collection(db, 'users'), where('phoneNumber', '==', trimmed)))
+    if (snap.empty) {
+      return {
+        uid: null,
+        userData: null,
+        authEmail: `${trimmed}@chatapp.local`,
+      }
+    }
+    const userDoc = snap.docs[0]
+    const userData = userDoc.data()
+    return {
+      uid: userDoc.id,
+      userData,
+      authEmail: userData.authEmail || `${trimmed}@chatapp.local`,
+    }
+  }
+
+  const getActiveSessions = async uid => {
+    if (!uid) return []
+    const currentDeviceId = getDeviceId()
+    const snap = await getDocs(query(collection(db, 'users', uid, 'devices'), where('active', '==', true)))
+    return snap.docs
+      .map(deviceDoc => ({ id: deviceDoc.id, ref: deviceDoc.ref, ...deviceDoc.data() }))
+      .filter(device => device.id !== currentDeviceId)
+  }
+
+  const notifyActiveSessionAttempt = async (email, userData, attemptInfo, activeSessions, status) => {
+    await sendAccountEmailQuietly(email, 'activeSessionLoginAttempt', userData.language || 'en', {
+      phoneNumber: userData.phoneNumber,
+      attemptTime: attemptInfo.attemptTimeText,
+      attemptDevice: attemptInfo.deviceLabel,
+      attemptCountry: attemptInfo.country,
+      attemptTimezone: attemptInfo.timezone,
+      activeDevice: activeSessions[0]?.deviceLabel || '',
+      status,
+    })
+  }
+
+  const startActiveSessionChallenge = async ({ uid, userData, authEmail }) => {
+    const email = userData?.contactEmail
+    if (!uid || !email) throw new Error(tr.noEmailOnFile)
+    const activeSessions = await getActiveSessions(uid)
+    if (activeSessions.length === 0) return false
+
+    const attemptInfo = {
+      ...getDeviceInfo(),
+      attemptTimeText: new Date().toLocaleString(),
+    }
+    const code = genCode()
+    await storeCode(activeSessionCodeKey(uid), code, 60_000, {
+      uid,
+      email,
+      purpose: 'active-session-login',
+      attemptDeviceId: getDeviceId(),
+      attemptDevice: attemptInfo.deviceLabel,
+      attemptCountry: attemptInfo.country,
+      attemptTimezone: attemptInfo.timezone,
+    })
+    await sendEmailCode(email, code, 1, userData.language || 'en')
+    await notifyActiveSessionAttempt(email, userData, attemptInfo, activeSessions, 'verification_required')
+    setConflict({
+      uid,
+      userData,
+      authEmail,
+      email,
+      activeSessions,
+      attemptInfo,
+    })
+    return true
+  }
 
   const handleLogin = async e => {
     e.preventDefault()
     setError(''); setLoading(true)
     try {
       const trimmed = input.trim()
-      let authEmail
-      if (trimmed.includes('@')) {
-        const snap = await getDocs(query(collection(db, 'users'), where('contactEmail', '==', trimmed)))
-        if (snap.empty) throw new Error()
-        const userData = snap.docs[0].data()
-        authEmail = userData.authEmail || `${userData.phoneNumber}@chatapp.local`
-      } else {
-        const snap = await getDocs(query(collection(db, 'users'), where('phoneNumber', '==', trimmed)))
-        authEmail = snap.empty
-          ? `${trimmed}@chatapp.local`
-          : snap.docs[0].data().authEmail || `${trimmed}@chatapp.local`
+      const target = await getLoginTarget(trimmed)
+      await signInWithEmailAndPassword(secondaryAuth, target.authEmail, pass)
+      await signOut(secondaryAuth)
+
+      const needsChallenge = await startActiveSessionChallenge(target)
+      if (needsChallenge) {
+        setLoading(false)
+        return
       }
-      await signInWithEmailAndPassword(auth, authEmail, pass)
-    } catch {
-      setError(tr.wrongCredentials)
+
+      await signInWithEmailAndPassword(auth, target.authEmail, pass)
+    } catch (e) {
+      await signOut(secondaryAuth).catch(() => {})
+      setError(e?.message === tr.noEmailOnFile ? tr.noEmailOnFile : tr.wrongCredentials)
     } finally {
       setLoading(false)
     }
+  }
+
+  const verifyActiveSession = async inputCode => {
+    if (!conflict) return { error: tr.wrongCredentials }
+    const res = await checkCode(activeSessionCodeKey(conflict.uid), inputCode)
+    if (!res.ok) {
+      await notifyActiveSessionAttempt(
+        conflict.email,
+        conflict.userData,
+        conflict.attemptInfo,
+        conflict.activeSessions,
+        res.reason === 'expired' ? 'verification_expired' : 'verification_failed'
+      )
+      await deleteDoc(doc(db, 'verificationCodes', activeSessionCodeKey(conflict.uid))).catch(() => {})
+      setConflict(null)
+      setError(res.reason === 'expired' ? tr.codeExpired : tr.wrongCode)
+      return { error: res.reason === 'expired' ? tr.codeExpired : tr.wrongCode }
+    }
+
+    await Promise.all(conflict.activeSessions.map(device =>
+      updateDoc(device.ref, {
+        active: false,
+        forcedLogout: true,
+        forceLogoutAt: serverTimestamp(),
+        loggedOutAt: serverTimestamp(),
+        lastSeenAt: serverTimestamp(),
+      })
+    ))
+    await deleteDoc(doc(db, 'verificationCodes', activeSessionCodeKey(conflict.uid)))
+    await notifyActiveSessionAttempt(
+      conflict.email,
+      conflict.userData,
+      conflict.attemptInfo,
+      conflict.activeSessions,
+      'verified_old_session_logged_out'
+    )
+    await signInWithEmailAndPassword(auth, conflict.authEmail, pass)
+    return {}
+  }
+
+  const resendActiveSessionCode = async () => {
+    if (!conflict) return
+    const code = genCode()
+    await storeCode(activeSessionCodeKey(conflict.uid), code, 60_000, {
+      uid: conflict.uid,
+      email: conflict.email,
+      purpose: 'active-session-login',
+      attemptDeviceId: getDeviceId(),
+      attemptDevice: conflict.attemptInfo.deviceLabel,
+      attemptCountry: conflict.attemptInfo.country,
+      attemptTimezone: conflict.attemptInfo.timezone,
+    })
+    await sendEmailCode(conflict.email, code, 1, conflict.userData.language || 'en')
+  }
+
+  if (conflict) {
+    return (
+      <CodeStep
+        email={conflict.email}
+        expirySec={60}
+        onVerify={verifyActiveSession}
+        onResend={resendActiveSessionCode}
+        tr={tr}
+        submitLabel={tr.verifyLogin || tr.continueBtn}
+      />
+    )
   }
 
   return (
@@ -473,7 +631,7 @@ function RegisterFlow({ tr }) {
     <div className="auth-form">
       <p className="auth-step-title">
         <button className="link-btn" onClick={() => setStep(2)}>â† {tr.back}</button>
-        &nbsp;Â·&nbsp;<strong>{email}</strong>
+        &nbsp;·&nbsp;<strong>{maskEmail(email)}</strong>
       </p>
       <div className="field">
         <label>{tr.nameLabel}</label>

@@ -45,6 +45,9 @@ const emailText = {
     emailChangedNewSubject: 'This email is now connected to GtyChat',
     emailChangedNewMessage: ({ phoneNumber, newEmail }) =>
       `GtyChat phone number ${phoneNumber} changed its email address to ${newEmail}.`,
+    activeSessionLoginAttemptSubject: 'Login attempt while your GtyChat account was active',
+    activeSessionLoginAttemptMessage: ({ phoneNumber, attemptTime, attemptDevice, attemptCountry, attemptTimezone, activeDevice, status }) =>
+      `A login attempt was made for GtyChat phone number ${phoneNumber} while another session was already active. Attempt time: ${attemptTime}. New device: ${attemptDevice || 'Unknown device'}. Location/timezone: ${attemptCountry || 'Unknown'} / ${attemptTimezone || 'Unknown'}. Active device: ${activeDevice || 'Unknown device'}. Status: ${status}.`,
   },
   de: {
     minutes: count => `${count} Minute${Number(count) === 1 ? '' : 'n'}`,
@@ -66,6 +69,9 @@ const emailText = {
     emailChangedNewSubject: 'Diese E-Mail ist jetzt mit GtyChat verbunden',
     emailChangedNewMessage: ({ phoneNumber, newEmail }) =>
       `Die GtyChat-Telefonnummer ${phoneNumber} hat ihre E-Mail-Adresse zu ${newEmail} geaendert.`,
+    activeSessionLoginAttemptSubject: 'Anmeldeversuch, waehrend dein GtyChat-Konto aktiv war',
+    activeSessionLoginAttemptMessage: ({ phoneNumber, attemptTime, attemptDevice, attemptCountry, attemptTimezone, activeDevice, status }) =>
+      `Es gab einen Anmeldeversuch fuer die GtyChat-Telefonnummer ${phoneNumber}, waehrend bereits eine andere Sitzung aktiv war. Zeit: ${attemptTime}. Neues Geraet: ${attemptDevice || 'Unbekanntes Geraet'}. Standort/Zeitzone: ${attemptCountry || 'Unbekannt'} / ${attemptTimezone || 'Unbekannt'}. Aktives Geraet: ${activeDevice || 'Unbekanntes Geraet'}. Status: ${status}.`,
   },
   fr: {
     minutes: count => `${count} minute${Number(count) === 1 ? '' : 's'}`,
@@ -87,6 +93,9 @@ const emailText = {
     emailChangedNewSubject: 'Cette adresse e-mail est maintenant liee a GtyChat',
     emailChangedNewMessage: ({ phoneNumber, newEmail }) =>
       `Le numero GtyChat ${phoneNumber} a change son adresse e-mail en ${newEmail}.`,
+    activeSessionLoginAttemptSubject: 'Tentative de connexion pendant une session GtyChat active',
+    activeSessionLoginAttemptMessage: ({ phoneNumber, attemptTime, attemptDevice, attemptCountry, attemptTimezone, activeDevice, status }) =>
+      `Une tentative de connexion a ete effectuee pour le numero GtyChat ${phoneNumber} alors qu'une autre session etait deja active. Heure: ${attemptTime}. Nouvel appareil: ${attemptDevice || 'Appareil inconnu'}. Pays/fuseau horaire: ${attemptCountry || 'Inconnu'} / ${attemptTimezone || 'Inconnu'}. Appareil actif: ${activeDevice || 'Appareil inconnu'}. Statut: ${status}.`,
   },
   ar: {
     minutes: count => `${count} دقيقة`,
@@ -108,10 +117,42 @@ const emailText = {
     emailChangedNewSubject: 'هذا البريد الإلكتروني مرتبط الآن بـ GtyChat',
     emailChangedNewMessage: ({ phoneNumber, newEmail }) =>
       `رقم GtyChat ${phoneNumber} غيّر بريده الإلكتروني إلى ${newEmail}.`,
+    activeSessionLoginAttemptSubject: 'محاولة تسجيل دخول أثناء وجود جلسة GtyChat نشطة',
+    activeSessionLoginAttemptMessage: ({ phoneNumber, attemptTime, attemptDevice, attemptCountry, attemptTimezone, activeDevice, status }) =>
+      `تمت محاولة تسجيل دخول لرقم GtyChat ${phoneNumber} بينما كانت هناك جلسة أخرى نشطة. وقت المحاولة: ${attemptTime}. الجهاز الجديد: ${attemptDevice || 'جهاز غير معروف'}. الموقع/المنطقة الزمنية: ${attemptCountry || 'غير معروف'} / ${attemptTimezone || 'غير معروف'}. الجهاز النشط: ${activeDevice || 'جهاز غير معروف'}. الحالة: ${status}.`,
   },
 }
 
 const getEmailText = lang => emailText[lang] || emailText[defaultLang]
+const loginAttemptStatusText = {
+  en: {
+    verification_required: 'verification required',
+    verification_expired: 'verification expired',
+    verification_failed: 'verification failed',
+    verified_old_session_logged_out: 'verified; previous session logged out',
+  },
+  de: {
+    verification_required: 'Bestaetigung erforderlich',
+    verification_expired: 'Bestaetigung abgelaufen',
+    verification_failed: 'Bestaetigung fehlgeschlagen',
+    verified_old_session_logged_out: 'bestaetigt; vorige Sitzung abgemeldet',
+  },
+  fr: {
+    verification_required: 'verification requise',
+    verification_expired: 'verification expiree',
+    verification_failed: 'verification echouee',
+    verified_old_session_logged_out: 'verifiee ; session precedente deconnectee',
+  },
+  ar: {
+    verification_required: 'التحقق مطلوب',
+    verification_expired: 'انتهت صلاحية التحقق',
+    verification_failed: 'فشل التحقق',
+    verified_old_session_logged_out: 'تم التحقق؛ تم تسجيل خروج الجلسة السابقة',
+  },
+}
+
+const getLoginAttemptStatusText = (status, lang) =>
+  loginAttemptStatusText[lang]?.[status] || loginAttemptStatusText[defaultLang][status] || status
 
 const missingEmailConfig = () =>
   Object.entries(emailConfig)
@@ -198,7 +239,11 @@ export const sendAccountEmail = async (toEmail, type, lang = defaultLang, detail
     throw new Error(`Unknown account email type: ${type}`)
   }
 
-  const message = messageBuilder(details)
+  const localizedStatus = getLoginAttemptStatusText(details.status, lang)
+  const message = messageBuilder({
+    ...details,
+    status: localizedStatus,
+  })
   return sendEmail(toEmail, {
     email_type: type,
     language: lang,
@@ -209,5 +254,11 @@ export const sendAccountEmail = async (toEmail, type, lang = defaultLang, detail
     phone_number: details.phoneNumber || '',
     old_email: details.oldEmail || '',
     new_email: details.newEmail || '',
+    attempt_time: details.attemptTime || '',
+    attempt_device: details.attemptDevice || '',
+    attempt_country: details.attemptCountry || '',
+    attempt_timezone: details.attemptTimezone || '',
+    active_device: details.activeDevice || '',
+    status: localizedStatus || '',
   })
 }

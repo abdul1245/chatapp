@@ -7,6 +7,7 @@ import ChatWindow from './ChatWindow'
 import Settings from './Settings'
 import CallManager from './CallManager'
 import { GtyLogo } from '../App'
+import { markCurrentDeviceInactive } from '../deviceSession'
 
 export default function ChatApp({ user, moderation }) {
   const [selectedChat, setSelectedChat]   = useState(null)
@@ -40,6 +41,7 @@ export default function ChatApp({ user, moderation }) {
   }, [markDelivered, user.uid])
 
   const handleLogout = async () => {
+    await markCurrentDeviceInactive(user)
     await setDoc(doc(db, 'status', user.uid), { online: false, activeChat: null, lastSeen: serverTimestamp() })
     await signOut(auth)
   }
@@ -57,7 +59,6 @@ export default function ChatApp({ user, moderation }) {
           user={user}
           selectedChat={selectedChat}
           onSelectChat={handleSelectChat}
-          onLogout={handleLogout}
           onSettings={() => setShowSettings(true)}
         />
       </div>
@@ -82,7 +83,7 @@ export default function ChatApp({ user, moderation }) {
         )}
       </div>
 
-      {showSettings && <Settings user={user} onClose={() => setShowSettings(false)} />}
+      {showSettings && <Settings user={user} onClose={() => setShowSettings(false)} onLogout={handleLogout} />}
       <CallManager user={user} request={callRequest} />
     </div>
   )

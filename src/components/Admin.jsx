@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
@@ -78,9 +78,28 @@ export default function Admin() {
   const [modTarget, setModTarget] = useState(null)
   const [modForm, setModForm] = useState(emptyModeration)
   const [deleteTarget, setDeleteTarget] = useState(null)
+  const [devicesTarget, setDevicesTarget] = useState(null)
+  const [devices, setDevices] = useState([])
+  const [deviceHistory, setDeviceHistory] = useState([])
+  const [deviceHistoryMeta, setDeviceHistoryMeta] = useState(null)
+  const [showingDeviceHistory, setShowingDeviceHistory] = useState(false)
+  const [deviceSearch, setDeviceSearch] = useState('')
+  const [devicesLoading, setDevicesLoading] = useState(false)
+  const [deviceLoadError, setDeviceLoadError] = useState('')
   const [now] = useState(() => Date.now())
+  const deviceLoadSeqRef = useRef(0)
   const text = (key, values = {}) =>
     Object.entries(values).reduce((out, [name, value]) => out.replace(`{${name}}`, value), tr[key] || '')
+  const logActionLabel = action => ({
+    user_created: tr.userCreated,
+    device_forced_logout: tr.deviceLoggedOut,
+    devices_cleared: tr.deviceListCleared,
+    account_updated: tr.userUpdated,
+    timeout_applied: tr.userTimedOut,
+    ban_applied: tr.userBanned,
+    moderation_lifted: tr.moderationLifted,
+    user_deleted: tr.userDeleted,
+  }[action] || action)
 
   const showFeedback = (msg, type = 'success') => {
     setFeedback({ msg, type })
@@ -112,6 +131,9 @@ export default function Admin() {
   const adminLogsRef = () => collection(secondaryDb, 'adminLogs')
   const deletedLogPackageRef = () => doc(secondaryDb, 'adminDeletedLogPackages', deletedLogPackageId)
   const deletedLogsRef = () => collection(secondaryDb, 'adminDeletedLogPackages', deletedLogPackageId, 'logs')
+  const userDevicesRef = uid => collection(secondaryDb, 'users', uid, 'devices')
+  const userDeviceHistoryRef = uid => doc(secondaryDb, 'users', uid, 'deviceHistory', 'lastCleared')
+  const userDeviceHistoryItemsRef = uid => collection(secondaryDb, 'users', uid, 'deviceHistory', 'lastCleared', 'items')
 
   const loadUsers = async () => {
     const snap = await getDocs(collection(secondaryDb, 'users'))
@@ -124,6 +146,10 @@ export default function Admin() {
   }
 
   const getMillis = value => value?.toMillis?.() ?? (value ? new Date(value).getTime() : 0)
+  const fmtDate = value => {
+    const date = value?.toDate?.() ?? (value ? new Date(value) : null)
+    return date ? date.toLocaleString() : '-'
+  }
 
   const loadDeletedLogs = async () => {
     const [metaSnap, logsSnap] = await Promise.all([
@@ -270,6 +296,22 @@ export default function Admin() {
   const visibleLogs = logs.filter(logMatches)
   const visibleDeletedLogs = deletedLogs.filter(logMatches)
   const activeLogs = showingDeletedLogs ? visibleDeletedLogs : visibleLogs
+  const activeDeviceRows = showingDeviceHistory ? deviceHistory : devices
+  const visibleDeviceRows = activeDeviceRows.filter(device => {
+    const needle = deviceSearch.trim().toLowerCase()
+    if (!needle) return true
+    return [
+      device.deviceLabel,
+      device.country,
+      device.timezone,
+      device.platform,
+      device.userAgent,
+      device.id,
+      fmtDate(device.loggedInAt),
+      fmtDate(device.loggedOutAt),
+      device.active ? 'active' : 'logged out',
+    ].some(value => String(value || '').toLowerCase().includes(needle))
+  })
 
   const clearLogs = async () => {
     if (!window.confirm(tr.clearLogsConfirm)) return
@@ -335,6 +377,123 @@ export default function Admin() {
       showFeedback(text('logsRecovered', { count: logsSnap.size }))
     } catch (err) {
       showFeedback(`${tr.recoverLogsFailed}: ${err.message || err.code || tr.unknownError}`, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const clearLoadedDevices = () => {
+    setDevices([])
+    setDeviceHistory([])
+    setDeviceHistoryMeta(null)
+  }
+
+  const loadUserDevices = async (target, seq = deviceLoadSeqRef.current) => {
+    const [devicesSnap, historyMetaSnap, historySnap] = await Promise.all([
+      getDocs(userDevicesRef(target.id)),
+      getDoc(userDeviceHistoryRef(target.id)),
+      getDocs(userDeviceHistoryItemsRef(target.id)),
+    ])
+    if (seq !== deviceLoadSeqRef.current) return
+    setDevices(devicesSnap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .sort((a, b) => getMillis(b.loggedInAt) - getMillis(a.loggedInAt)))
+    setDeviceHistoryMeta(historyMetaSnap.exists() ? historyMetaSnap.data() : null)
+    setDeviceHistory(historySnap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .sort((a, b) => getMillis(b.loggedInAt) - getMillis(a.loggedInAt)))
+  }
+
+  const openDevices = async user => {
+    const seq = deviceLoadSeqRef.current + 1
+    deviceLoadSeqRef.current = seq
+    setDevicesTarget(user)
+    setShowingDeviceHistory(false)
+    setDeviceSearch('')
+    setDeviceLoadError('')
+    clearLoadedDevices()
+    setDevicesLoading(true)
+    try {
+      await loadUserDevices(user, seq)
+    } catch (err) {
+      if (seq !== deviceLoadSeqRef.current) return
+      clearLoadedDevices()
+      const message = `${tr.failedLoadAdminData}: ${err.message}`
+      setDeviceLoadError(message)
+      showFeedback(message, 'error')
+    } finally {
+      if (seq === deviceLoadSeqRef.current) setDevicesLoading(false)
+    }
+  }
+
+  const closeDevices = () => {
+    deviceLoadSeqRef.current += 1
+    setDevicesTarget(null)
+    setDevicesLoading(false)
+    setDeviceLoadError('')
+    clearLoadedDevices()
+  }
+
+  const forceLogoutDevice = async device => {
+    if (!devicesTarget) return
+    setBusy(true)
+    try {
+      await updateDoc(doc(secondaryDb, 'users', devicesTarget.id, 'devices', device.id), {
+        active: false,
+        forcedLogout: true,
+        forceLogoutAt: serverTimestamp(),
+        loggedOutAt: serverTimestamp(),
+        lastSeenAt: serverTimestamp(),
+      })
+      await logAction('device_forced_logout', devicesTarget, {
+        deviceId: device.id,
+        deviceLabel: device.deviceLabel || '',
+        country: device.country || '',
+      })
+      await loadUserDevices(devicesTarget)
+      showFeedback(tr.deviceLoggedOut)
+    } catch (err) {
+      showFeedback(`${tr.deviceLogoutFailed}: ${err.message}`, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const clearDeviceList = async () => {
+    if (!devicesTarget) return
+    if (!window.confirm(tr.clearDeviceListConfirm)) return
+
+    setBusy(true)
+    try {
+      const [currentSnap, previousHistorySnap] = await Promise.all([
+        getDocs(userDevicesRef(devicesTarget.id)),
+        getDocs(userDeviceHistoryItemsRef(devicesTarget.id)),
+      ])
+      if (currentSnap.empty) {
+        showFeedback(tr.noDevicesToClear, 'error')
+        return
+      }
+
+      const tasks = [
+        ...previousHistorySnap.docs.map(deviceDoc => batch => batch.delete(deviceDoc.ref)),
+        batch => batch.set(userDeviceHistoryRef(devicesTarget.id), {
+          count: currentSnap.size,
+          clearedAt: serverTimestamp(),
+        }),
+        ...currentSnap.docs.map(deviceDoc => batch => batch.set(doc(userDeviceHistoryItemsRef(devicesTarget.id), deviceDoc.id), {
+          ...deviceDoc.data(),
+          originalDeviceId: deviceDoc.id,
+          archivedAt: serverTimestamp(),
+        })),
+        ...currentSnap.docs.map(deviceDoc => batch => batch.delete(deviceDoc.ref)),
+      ]
+      await commitInBatches(tasks)
+      await logAction('devices_cleared', devicesTarget, { count: currentSnap.size })
+      setShowingDeviceHistory(true)
+      await loadUserDevices(devicesTarget)
+      showFeedback(tr.deviceListCleared)
+    } catch (err) {
+      showFeedback(`${tr.clearDevicesFailed}: ${err.message}`, 'error')
     } finally {
       setBusy(false)
     }
@@ -576,11 +735,6 @@ export default function Admin() {
     }
   }
 
-  const fmtDate = value => {
-    const date = value?.toDate?.() ?? (value ? new Date(value) : null)
-    return date ? date.toLocaleString() : '-'
-  }
-
   if (!authed) {
     return (
       <div className="auth-page">
@@ -739,6 +893,7 @@ export default function Admin() {
                   </div>
                   <span className={`user-card-badge badge-${status === 'ban' ? 'banned' : status}`}>{statusLabel}</span>
                   <div className="user-card-actions">
+                    <button className="action-btn" onClick={() => openDevices(user)}>{tr.showDevices}</button>
                     <button className="action-btn" onClick={() => openEdit(user)}>{tr.edit}</button>
                     <button className="action-btn" onClick={() => openModeration(user, 'timeout')}>{tr.timeout}</button>
                     <button className="action-btn danger" onClick={() => openModeration(user, 'ban')}>{tr.ban}</button>
@@ -792,7 +947,7 @@ export default function Admin() {
             ) : activeLogs.map(log => (
               <div className="log-row" key={log.id}>
                 <div>
-                  <strong>{log.action}</strong>
+                  <strong>{logActionLabel(log.action)}</strong>
                   <div className="user-card-meta">{log.targetPhone || log.targetUid || tr.unknownUser} · {fmtDate(log.createdAt)}</div>
                 </div>
                 <pre>{JSON.stringify(log.details || {}, null, 2)}</pre>
@@ -801,6 +956,72 @@ export default function Admin() {
           </section>
         )}
       </div>
+
+      {devicesTarget && (
+        <div className="modal-overlay" onClick={closeDevices}>
+          <div className="modal admin-devices-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>{text('devicesTitle', { name: buildDisplayName(devicesTarget) || devicesTarget.phoneNumber || tr.unknown })}</h2>
+              <button className="icon-btn" onClick={closeDevices}>x</button>
+            </div>
+
+            <div className="admin-device-toolbar">
+              <input
+                value={deviceSearch}
+                onChange={e => setDeviceSearch(e.target.value)}
+                placeholder={tr.deviceSearchPlaceholder}
+              />
+              <button
+                type="button"
+                className="action-btn"
+                onClick={() => setShowingDeviceHistory(value => !value)}
+                disabled={deviceHistory.length === 0}
+              >
+                {showingDeviceHistory ? tr.currentDevices : tr.lastDevicesHistory}
+              </button>
+              <button type="button" className="action-btn danger" onClick={clearDeviceList} disabled={busy || devices.length === 0}>
+                {tr.clearList}
+              </button>
+            </div>
+
+            {showingDeviceHistory && deviceHistoryMeta && (
+              <div className="user-card-meta">
+                {text('lastClearedDevices', { date: fmtDate(deviceHistoryMeta.clearedAt), count: deviceHistoryMeta.count || deviceHistory.length })}
+              </div>
+            )}
+
+            <div className="device-list admin-device-list">
+              {devicesLoading ? (
+                <div className="sidebar-empty">{tr.loadingDevices}</div>
+              ) : deviceLoadError ? (
+                <div className="error-banner">{deviceLoadError}</div>
+              ) : visibleDeviceRows.length === 0 ? (
+                <div className="sidebar-empty">{tr.noDevicesFound}</div>
+              ) : visibleDeviceRows.map(device => (
+                <div className="device-row" key={device.id}>
+                  <div className="device-row-main">
+                    <div className="device-row-title">
+                      {device.deviceLabel || tr.unknownDevice}
+                      <span className={`device-pill ${device.active ? 'active' : ''}`}>{device.active ? tr.statusActive : tr.deviceStatusLoggedOut}</span>
+                    </div>
+                    <div className="device-row-meta">
+                      {device.country || tr.unknownCountry} · {text('loggedInOn', { date: fmtDate(device.loggedInAt) })}
+                    </div>
+                    <div className="device-row-meta">
+                      {device.timezone || '-'} · {device.platform || device.id}
+                    </div>
+                  </div>
+                  {!showingDeviceHistory && device.active && (
+                    <button className="action-btn danger" onClick={() => forceLogoutDevice(device)} disabled={busy}>
+                      {tr.forceLogout}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {editTarget && (
         <div className="modal-overlay" onClick={() => setEditTarget(null)}>

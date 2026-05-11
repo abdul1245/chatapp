@@ -6,33 +6,47 @@ import {
 } from 'firebase/firestore'
 import { db } from '../firebase'
 import { buildDisplayName } from '../profile'
+import { useAppContext } from '../context/AppContext'
 
 const AGORA_APP_ID = import.meta.env.VITE_AGORA_APP_ID || '44b55e8620e8421b9be760862e6a2a7e'
 const OPEN_STATUSES = new Set(['ringing', 'active'])
 const RING_TIMEOUT_MS = 30_000
 const REMOTE_NORMAL_VOLUME = 55
 const REMOTE_SPEAKER_VOLUME = 100
+const FRONT_CAMERA_FACING_MODE = 'user'
+const REAR_CAMERA_FACING_MODE = 'environment'
 
 const millisFromTimestamp = value => value?.toMillis?.() ?? 0
-const callKindText = callType => `${callType === 'video' ? 'video' : 'voice'} call`
-const displayNameOrFallback = (...values) => {
+const formatText = (template, values = {}) =>
+  Object.entries(values).reduce((out, [name, value]) => out.replace(`{${name}}`, value), template || '')
+const callKindText = (callType, tr) => callType === 'video' ? tr.callKindVideo : tr.callKindVoice
+const displayNameOrFallback = (tr, ...values) => {
   const value = values.find(item => String(item || '').trim())
-  return String(value || 'Unknown user').trim()
+  return String(value || tr.unknownUser).trim()
 }
-const callStatusText = status => ({
-  ringing: 'ringing',
-  accepted: 'accepted',
-  declined: 'declined',
-  canceled: 'canceled',
-  unanswered: 'not answered',
-  ended: 'accepted and ended',
-  failed: 'failed',
-  left: 'ended',
+const callStatusText = (status, tr) => ({
+  ringing: tr.callStatusRinging,
+  accepted: tr.callStatusAccepted,
+  declined: tr.callStatusDeclined,
+  canceled: tr.callStatusCanceled,
+  unanswered: tr.callStatusUnanswered,
+  ended: tr.callStatusAcceptedEnded,
+  failed: tr.callStatusFailed,
+  left: tr.callStatusEnded,
 }[status] || status)
-const buildCallMessageText = (call, callStatus) => {
-  const caller = displayNameOrFallback(call.callerName, call.callerPhone)
-  const receiver = displayNameOrFallback(call.receiverName, call.receiverPhone)
-  return `${caller} called ${receiver} - ${callKindText(call.type)} ${callStatusText(callStatus)}`
+const buildCallMessageText = (call, callStatus, tr) => {
+  const caller = displayNameOrFallback(tr, call.callerName, call.callerPhone)
+  const receiver = displayNameOrFallback(tr, call.receiverName, call.receiverPhone)
+  return formatText(tr.callMessageText, {
+    caller,
+    receiver,
+    kind: callKindText(call.type, tr),
+    status: callStatusText(callStatus, tr),
+  })
+}
+const chatBlocksEitherUser = (chat, firstUserId, secondUserId) => {
+  const blockedBy = chat?.blockedBy || []
+  return blockedBy.includes(firstUserId) || blockedBy.includes(secondUserId)
 }
 const getFinalCallStatus = (call, reason) => {
   if (reason === 'declined') return 'declined'
@@ -48,70 +62,75 @@ const getRingingStartedAt = call =>
 const getRemotePlaybackVolume = (silenced, speaker) =>
   silenced ? 0 : speaker ? REMOTE_SPEAKER_VOLUME : REMOTE_NORMAL_VOLUME
 
-const describeMediaError = (err, callType) => {
+const describeMediaError = (err, callType, tr) => {
   const code = err?.code || err?.name || ''
   const message = err?.message || ''
   const detail = [code, message].filter(Boolean).join(': ')
 
   if (!window.isSecureContext) {
-    return 'Calls need a secure page. Use localhost or HTTPS, then try again.'
+    return tr.mediaSecurePage
   }
 
   if (/permission|notallowed/i.test(`${code} ${message}`)) {
     return callType === 'video'
-      ? 'Camera or microphone permission was blocked for this site.'
-      : 'Microphone permission was blocked for this site.'
+      ? tr.cameraMicPermissionBlocked
+      : tr.micPermissionBlocked
   }
 
   if (/notfound|devices_not_found/i.test(`${code} ${message}`)) {
     return callType === 'video'
-      ? 'No camera or microphone was found.'
-      : 'No microphone was found.'
+      ? tr.noCameraMicFound
+      : tr.noMicFound
   }
 
   if (/notreadable|track_start/i.test(`${code} ${message}`)) {
     return callType === 'video'
-      ? 'Your camera or microphone is already in use by another app.'
-      : 'Your microphone is already in use by another app.'
+      ? tr.cameraMicInUse
+      : tr.micInUse
   }
 
   return detail
-    ? `Could not start ${callType} call. ${detail}`
-    : `Could not start ${callType} call.`
+    ? formatText(tr.couldNotStartCallWithDetail, { type: callType, detail })
+    : formatText(tr.couldNotStartCallType, { type: callType })
 }
 
-const createLocalTracks = async callType => {
+const createCameraVideoTrack = (facingMode = FRONT_CAMERA_FACING_MODE) =>
+  AgoraRTC.createCameraVideoTrack({ facingMode })
+
+const createLocalTracks = async (callType, existingVideoTrack = null) => {
   const audioTrack = await AgoraRTC.createMicrophoneAudioTrack({
     encoderConfig: 'speech_standard',
   })
 
   if (callType !== 'video') return { tracks: [audioTrack], videoError: null }
 
+  if (existingVideoTrack) return { tracks: [audioTrack, existingVideoTrack], videoError: null }
+
   try {
-    const videoTrack = await AgoraRTC.createCameraVideoTrack()
+    const videoTrack = await createCameraVideoTrack()
     return { tracks: [audioTrack, videoTrack], videoError: null }
   } catch (err) {
     return { tracks: [audioTrack], videoError: err }
   }
 }
 
-const describeCameraError = err => {
+const describeCameraError = (err, tr) => {
   const code = err?.code || err?.name || ''
   const message = err?.message || ''
 
   if (/permission|notallowed/i.test(`${code} ${message}`)) {
-    return 'Camera permission was blocked for this site.'
+    return tr.cameraPermissionBlocked
   }
 
   if (/notfound|devices_not_found/i.test(`${code} ${message}`)) {
-    return 'No camera was found.'
+    return tr.noCameraFound
   }
 
   if (/notreadable|track_start/i.test(`${code} ${message}`)) {
-    return 'Your camera is already in use by another app.'
+    return tr.cameraInUse
   }
 
-  return 'Could not turn on camera.'
+  return tr.couldNotTurnOnCamera
 }
 
 const findLocalTrack = (tracks, mediaType) => tracks.find(track => track.trackMediaType === mediaType)
@@ -130,7 +149,30 @@ function RemoteVideo({ user, className = 'call-video call-video-remote' }) {
   return <div className={className} ref={ref} />
 }
 
+function SwitchCameraButton({ facingMode, switching, onSwitch, tr }) {
+  const label = facingMode === FRONT_CAMERA_FACING_MODE ? tr.switchRearCamera : tr.switchFrontCamera
+  return (
+    <button
+      type="button"
+      className="switch-camera-btn"
+      onClick={e => {
+        e.stopPropagation()
+        onSwitch()
+      }}
+      onPointerDown={e => e.stopPropagation()}
+      disabled={switching}
+      title={label}
+      aria-label={label}
+    >
+      <svg viewBox="0 0 24 24" fill="currentColor" width="19" height="19" aria-hidden="true">
+        <path d="M20 5h-3.17l-1.24-1.35A2 2 0 0014.12 3H9.88a2 2 0 00-1.47.65L7.17 5H4a2 2 0 00-2 2v11a2 2 0 002 2h16a2 2 0 002-2V7a2 2 0 00-2-2zm-8 13a5 5 0 01-4.48-2.78l1.55-.63A3.33 3.33 0 0012 16.33c1.07 0 2.02-.5 2.63-1.28H12v-1.67h5v5h-1.67v-1.9A4.95 4.95 0 0112 18zm4.48-9.22-1.55.63A3.33 3.33 0 0012 7.67c-1.07 0-2.02.5-2.63 1.28H12v1.67H7v-5h1.67v1.9A4.95 4.95 0 0112 6a5 5 0 014.48 2.78z" />
+      </svg>
+    </button>
+  )
+}
+
 export default function CallManager({ user, request }) {
+  const { tr } = useAppContext()
   const [currentCall, setCurrentCall] = useState(null)
   const [remoteUsers, setRemoteUsers] = useState([])
   const [otherProfileState, setOtherProfileState] = useState(null)
@@ -139,6 +181,8 @@ export default function CallManager({ user, request }) {
   const [localVideoReady, setLocalVideoReady] = useState(false)
   const [localMicOn, setLocalMicOn] = useState(true)
   const [localCameraOn, setLocalCameraOn] = useState(false)
+  const [cameraFacingMode, setCameraFacingMode] = useState(FRONT_CAMERA_FACING_MODE)
+  const [switchingCamera, setSwitchingCamera] = useState(false)
   const [speakerOn, setSpeakerOn] = useState(false)
   const [remoteSilenced, setRemoteSilenced] = useState(false)
   const [mediaNotice, setMediaNotice] = useState('')
@@ -152,6 +196,7 @@ export default function CallManager({ user, request }) {
   const remoteAudioTracksRef = useRef(new Map())
   const speakerOnRef = useRef(false)
   const remoteSilencedRef = useRef(false)
+  const cameraFacingModeRef = useRef(FRONT_CAMERA_FACING_MODE)
   const joinedCallIdRef = useRef(null)
   const joiningCallIdRef = useRef(null)
   const localVideoRef = useRef(null)
@@ -166,6 +211,10 @@ export default function CallManager({ user, request }) {
     currentCallRef.current = currentCall
   }, [currentCall])
 
+  useEffect(() => {
+    cameraFacingModeRef.current = cameraFacingMode
+  }, [cameraFacingMode])
+
   const otherUserId = useMemo(() => {
     if (!currentCall) return null
     return currentCall.callerId === user.uid ? currentCall.receiverId : currentCall.callerId
@@ -176,16 +225,18 @@ export default function CallManager({ user, request }) {
 
   const otherName = useMemo(() => {
     if (!currentCall) return ''
-    if (otherProfile) return buildDisplayName(otherProfile) || otherProfile.phoneNumber || 'Unknown user'
-    if (currentCall.callerId === user.uid) return currentCall.receiverName || currentCall.receiverPhone || 'Unknown user'
-    return currentCall.callerName || currentCall.callerPhone || 'Unknown user'
-  }, [currentCall, otherProfile, user.uid])
+    if (otherProfile) return buildDisplayName(otherProfile) || otherProfile.phoneNumber || tr.unknownUser
+    if (currentCall.callerId === user.uid) return currentCall.receiverName || currentCall.receiverPhone || tr.unknownUser
+    return currentCall.callerName || currentCall.callerPhone || tr.unknownUser
+  }, [currentCall, otherProfile, tr.unknownUser, user.uid])
 
   const isIncomingRinging = currentCall?.status === 'ringing' && currentCall.receiverId === user.uid
   const isOutgoingRinging = currentCall?.status === 'ringing' && currentCall.callerId === user.uid
   const isActive = currentCall?.status === 'active'
   const isVideoCall = currentCall?.type === 'video'
-  const showVideoStage = isActive && (isVideoCall || localCameraOn || remoteUsers.length > 0)
+  const isOutgoingVideoRinging = isOutgoingRinging && isVideoCall
+  const showVideoStage = (isActive && (isVideoCall || localCameraOn || remoteUsers.length > 0))
+    || (isOutgoingVideoRinging && localCameraOn)
   const remoteVideoUser = remoteUsers.find(remoteUser => remoteUser.videoTrack) || null
   const hasRemoteVideo = Boolean(remoteVideoUser)
   const hasLocalVideo = Boolean(localCameraOn && localVideoReady)
@@ -216,26 +267,78 @@ export default function CallManager({ user, request }) {
 
   useEffect(() => {
     if (!showVideoStage) return
+    let active = true
     if (featuredVideo === 'remote' && !hasRemoteVideo && hasLocalVideo) {
-      setFeaturedVideo('local')
+      queueMicrotask(() => active && setFeaturedVideo('local'))
     } else if (featuredVideo === 'local' && !hasLocalVideo && hasRemoteVideo) {
-      setFeaturedVideo('remote')
+      queueMicrotask(() => active && setFeaturedVideo('remote'))
+    }
+    return () => {
+      active = false
     }
   }, [featuredVideo, hasLocalVideo, hasRemoteVideo, showVideoStage])
 
   useEffect(() => {
     if (!activeCallId) return
-    setFeaturedVideo('remote')
-    setPreviewCorner('bottom-right')
-    setPreviewDrag(null)
+    let active = true
+    queueMicrotask(() => {
+      if (!active) return
+      setFeaturedVideo('remote')
+      setPreviewCorner('bottom-right')
+      setPreviewDrag(null)
+    })
+    return () => {
+      active = false
+    }
   }, [activeCallId])
+
+  useEffect(() => {
+    if (!activeCallId || !isOutgoingVideoRinging) return undefined
+
+    let cancelled = false
+    const ensureOutgoingVideoPreview = async () => {
+      const existingTrack = findLocalTrack(localTracksRef.current, 'video')
+      if (existingTrack) {
+        setLocalCameraOn(true)
+        setLocalVideoReady(true)
+        setCameraFacingMode(cameraFacingModeRef.current)
+        return
+      }
+
+      try {
+        const videoTrack = await createCameraVideoTrack(FRONT_CAMERA_FACING_MODE)
+        if (cancelled || currentCallRef.current?.id !== activeCallId || currentCallRef.current?.status !== 'ringing') {
+          videoTrack.stop()
+          videoTrack.close()
+          return
+        }
+        localTracksRef.current = [...localTracksRef.current, videoTrack]
+        setLocalCameraOn(true)
+        setLocalVideoReady(true)
+        setCameraFacingMode(FRONT_CAMERA_FACING_MODE)
+        setMediaNotice('')
+      } catch (err) {
+        if (cancelled) return
+        console.warn('Outgoing video preview failed:', err)
+        setLocalCameraOn(false)
+        setLocalVideoReady(false)
+        setMediaNotice(describeCameraError(err, tr))
+      }
+    }
+
+    ensureOutgoingVideoPreview()
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeCallId, isOutgoingVideoRinging, tr])
 
   const updateCallAndMessage = useCallback(async (call, callPatch, callStatus, options = {}) => {
     const callRef = doc(db, 'calls', call.id)
     const hasCallMessage = Boolean(call.chatId && call.callMessageId)
     const chatRef = hasCallMessage ? doc(db, 'chats', call.chatId) : null
     const messageRef = hasCallMessage ? doc(db, 'chats', call.chatId, 'messages', call.callMessageId) : null
-    const text = buildCallMessageText(call, callStatus)
+    const text = buildCallMessageText(call, callStatus, tr)
     const lastMessage = {
       text,
       type: 'call',
@@ -251,6 +354,9 @@ export default function CallManager({ user, request }) {
       const chatSnap = chatRef ? await transaction.get(chatRef) : null
       if (!callSnap.exists()) return false
       if (options.expectedStatus && callSnap.data().status !== options.expectedStatus) return false
+      if (options.preventIfBlocked && chatSnap?.exists() && chatBlocksEitherUser(chatSnap.data(), call.callerId, call.receiverId)) {
+        return false
+      }
       transaction.update(callRef, callPatch)
 
       if (!messageRef) return true
@@ -273,7 +379,7 @@ export default function CallManager({ user, request }) {
       }
       return true
     })
-  }, [])
+  }, [tr])
 
   const updateLocalCallControls = useCallback(patch => {
     const call = currentCallRef.current
@@ -298,6 +404,8 @@ export default function CallManager({ user, request }) {
     setLocalVideoReady(false)
     setLocalMicOn(true)
     setLocalCameraOn(false)
+    setCameraFacingMode(FRONT_CAMERA_FACING_MODE)
+    setSwitchingCamera(false)
     setSpeakerOn(false)
     setRemoteSilenced(false)
     setMediaNotice('')
@@ -386,7 +494,10 @@ export default function CallManager({ user, request }) {
     const client = getClient()
 
     try {
-      const { tracks, videoError } = await createLocalTracks(call.type)
+      const existingVideoTrack = call.type === 'video'
+        ? findLocalTrack(localTracksRef.current, 'video')
+        : null
+      const { tracks, videoError } = await createLocalTracks(call.type, existingVideoTrack)
       localTracksRef.current = tracks
       await client.join(AGORA_APP_ID, call.channelName, null, user.uid)
       await client.publish(tracks)
@@ -395,7 +506,8 @@ export default function CallManager({ user, request }) {
       setLocalMicOn(true)
       setLocalCameraOn(hasVideoTrack)
       setLocalVideoReady(hasVideoTrack)
-      setMediaNotice(videoError ? describeCameraError(videoError) : '')
+      setCameraFacingMode(FRONT_CAMERA_FACING_MODE)
+      setMediaNotice(videoError ? describeCameraError(videoError, tr) : '')
       updateLocalCallControls({ micMuted: false, silencerOn: remoteSilencedRef.current })
     } catch (err) {
       console.error('Agora join failed:', err)
@@ -407,17 +519,18 @@ export default function CallManager({ user, request }) {
       setLocalMicOn(true)
       setLocalCameraOn(false)
       setLocalVideoReady(false)
+      setCameraFacingMode(FRONT_CAMERA_FACING_MODE)
       try {
         await client.leave()
       } catch { /* ignore cleanup failure */ }
-      setCallError(describeMediaError(err, call.type))
+      setCallError(describeMediaError(err, call.type, tr))
       await endFirestoreCall('media-failed')
     } finally {
       if (joiningCallIdRef.current === call.id) {
         joiningCallIdRef.current = null
       }
     }
-  }, [endFirestoreCall, getClient, leaveAgora, updateLocalCallControls, user.uid])
+  }, [endFirestoreCall, getClient, leaveAgora, tr, updateLocalCallControls, user.uid])
 
   useEffect(() => {
     const callsQuery = query(collection(db, 'calls'), where('participants', 'array-contains', user.uid))
@@ -445,6 +558,13 @@ export default function CallManager({ user, request }) {
       if (currentCallRef.current) return
 
       try {
+        const chatSnap = await getDoc(doc(db, 'chats', request.chat.id))
+        if (!chatSnap.exists()) throw new Error(tr.chatNotFound || tr.couldNotStartCall)
+        if (chatBlocksEitherUser(chatSnap.data(), user.uid, request.chat.otherId)) {
+          setCallError(tr.callsDisabledBlocked)
+          return
+        }
+
         const callerSnap = await getDoc(doc(db, 'users', user.uid))
         const callerData = callerSnap.exists() ? callerSnap.data() : {}
         const channelName = `gty_${request.chat.id}_${Date.now()}`
@@ -474,7 +594,7 @@ export default function CallManager({ user, request }) {
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         }
-        const text = buildCallMessageText(callData, 'ringing')
+        const text = buildCallMessageText(callData, 'ringing', tr)
         const batch = writeBatch(db)
         batch.set(callRef, callData)
         batch.set(messageRef, {
@@ -507,12 +627,12 @@ export default function CallManager({ user, request }) {
         await batch.commit()
       } catch (err) {
         console.error('Call start failed:', err)
-        setCallError('Could not start the call.')
+        setCallError(tr.couldNotStartCall)
       }
     }
 
     startCall()
-  }, [request, user.uid])
+  }, [request, tr, user.uid])
 
   useEffect(() => {
     if (!otherUserId) return undefined
@@ -600,15 +720,19 @@ export default function CallManager({ user, request }) {
   const acceptCall = async () => {
     if (!currentCall) return
     try {
-      await updateCallAndMessage(currentCall, {
+      const updated = await updateCallAndMessage(currentCall, {
         status: 'active',
         acceptedBy: user.uid,
         acceptedAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
-      }, 'accepted', { expectedStatus: 'ringing' })
+      }, 'accepted', { expectedStatus: 'ringing', preventIfBlocked: true })
+      if (updated === false) {
+        setCallError(tr.callsDisabledBlocked)
+        await endFirestoreCall('blocked')
+      }
     } catch (err) {
       console.error('Accept call failed:', err)
-      setCallError('Could not accept the call.')
+      setCallError(tr.couldNotAcceptCall)
     }
   }
 
@@ -624,7 +748,7 @@ export default function CallManager({ user, request }) {
       setMediaNotice('')
     } catch (err) {
       console.warn('Microphone toggle failed:', err)
-      setMediaNotice('Could not update microphone.')
+      setMediaNotice(tr.couldNotUpdateMicrophone)
     }
   }
 
@@ -640,21 +764,22 @@ export default function CallManager({ user, request }) {
         setMediaNotice('')
       } catch (err) {
         console.warn('Camera enable failed:', err)
-        setMediaNotice(describeCameraError(err))
+        setMediaNotice(describeCameraError(err, tr))
       }
       return
     }
 
     try {
-      const videoTrack = await AgoraRTC.createCameraVideoTrack()
+      const videoTrack = await createCameraVideoTrack(FRONT_CAMERA_FACING_MODE)
       localTracksRef.current = [...localTracksRef.current, videoTrack]
       await clientRef.current.publish(videoTrack)
       setLocalCameraOn(true)
       setLocalVideoReady(true)
+      setCameraFacingMode(FRONT_CAMERA_FACING_MODE)
       setMediaNotice('')
     } catch (err) {
       console.warn('Camera publish failed:', err)
-      setMediaNotice(describeCameraError(err))
+      setMediaNotice(describeCameraError(err, tr))
     }
   }
 
@@ -686,6 +811,28 @@ export default function CallManager({ user, request }) {
       turnCameraOff()
     } else {
       turnCameraOn()
+    }
+  }
+
+  const switchCamera = async () => {
+    const videoTrack = findLocalTrack(localTracksRef.current, 'video')
+    if (!videoTrack || !localCameraOn || switchingCamera) return
+
+    const nextFacingMode = cameraFacingModeRef.current === FRONT_CAMERA_FACING_MODE
+      ? REAR_CAMERA_FACING_MODE
+      : FRONT_CAMERA_FACING_MODE
+
+    setSwitchingCamera(true)
+    try {
+      await videoTrack.setDevice({ facingMode: nextFacingMode })
+      setCameraFacingMode(nextFacingMode)
+      setLocalVideoReady(true)
+      setMediaNotice('')
+    } catch (err) {
+      console.warn('Camera switch failed:', err)
+      setMediaNotice(describeCameraError(err, tr))
+    } finally {
+      setSwitchingCamera(false)
     }
   }
 
@@ -797,39 +944,62 @@ export default function CallManager({ user, request }) {
             ) : featuredSource === 'local' ? (
               <div className="call-video call-video-local-featured">
                 <div className="call-video-feed" ref={localVideoRef} />
-                {!localCameraOn && <span>Camera off</span>}
-                {localCameraOn && !localVideoReady && <span>Camera starting</span>}
+                {hasLocalVideo && (
+                  <SwitchCameraButton
+                    facingMode={cameraFacingMode}
+                    switching={switchingCamera}
+                    onSwitch={switchCamera}
+                    tr={tr}
+                  />
+                )}
+                {!localCameraOn && <span>{tr.cameraOff}</span>}
+                {localCameraOn && !localVideoReady && <span>{tr.cameraStarting}</span>}
               </div>
             ) : (
               <div className="call-video call-video-waiting">
                 <div className="call-avatar">{otherName[0]?.toUpperCase() || '?'}</div>
-                <span>{isVideoCall ? 'Waiting for video' : 'Camera is on'}</span>
+                <span>{isVideoCall ? tr.waitingForVideo : tr.cameraIsOn}</span>
               </div>
             )}
 
             {showPreview && (
-              <button
-                type="button"
+              <div
                 ref={previewRef}
+                role="button"
+                tabIndex={0}
                 className={`call-video-preview call-video-preview-${previewCorner} ${previewDrag ? 'dragging' : ''} ${previewSource === 'local' && !localCameraOn ? 'camera-off' : ''}`}
                 style={previewDrag ? { left: previewDrag.left, top: previewDrag.top } : undefined}
                 onClick={swapFeaturedVideo}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    swapFeaturedVideo()
+                  }
+                }}
                 onPointerDown={handlePreviewPointerDown}
                 onPointerMove={handlePreviewPointerMove}
                 onPointerUp={handlePreviewPointerEnd}
                 onPointerCancel={handlePreviewPointerEnd}
-                title="Switch camera view"
+                title={tr.switchCameraView}
               >
                 {previewSource === 'remote' && remoteVideoUser ? (
                   <RemoteVideo user={remoteVideoUser} className="call-video-preview-feed" />
                 ) : (
                   <>
                     <div className="call-video-feed" ref={localVideoRef} />
-                    {!localCameraOn && <span>Camera off</span>}
-                    {localCameraOn && !localVideoReady && <span>Camera starting</span>}
+                    {hasLocalVideo && previewSource === 'local' && (
+                      <SwitchCameraButton
+                        facingMode={cameraFacingMode}
+                        switching={switchingCamera}
+                        onSwitch={switchCamera}
+                        tr={tr}
+                      />
+                    )}
+                    {!localCameraOn && <span>{tr.cameraOff}</span>}
+                    {localCameraOn && !localVideoReady && <span>{tr.cameraStarting}</span>}
                   </>
                 )}
-              </button>
+              </div>
             )}
           </div>
         ) : (
@@ -847,12 +1017,12 @@ export default function CallManager({ user, request }) {
           <div className="call-status">
             {callError || (
               mediaNotice || (isActive
-                ? `${currentCall.type === 'video' ? 'Video' : 'Voice'} call ${formatElapsed(elapsed)}`
+                ? formatText(tr.activeCallStatus, { type: currentCall.type === 'video' ? tr.callKindVideo : tr.callKindVoice, time: formatElapsed(elapsed) })
                 : isIncomingRinging
-                  ? `Incoming ${currentCall.type} call ${formatRemaining(ringTimeLeft)}`
+                  ? formatText(tr.incomingCallStatus, { type: currentCall.type === 'video' ? tr.callKindVideo : tr.callKindVoice, time: formatRemaining(ringTimeLeft) })
                   : isOutgoingRinging
-                    ? `Calling ${otherName}... ${formatRemaining(ringTimeLeft)}`
-                    : 'Connecting...')
+                    ? formatText(tr.callingStatus, { name: otherName, time: formatRemaining(ringTimeLeft) })
+                    : tr.connecting)
             )}
           </div>
           {isActive && (otherMicMuted || otherSilencerOn) && (
@@ -862,7 +1032,7 @@ export default function CallManager({ user, request }) {
                   <svg viewBox="0 0 24 24" fill="currentColor" width="13" height="13" aria-hidden="true">
                     <path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05L19 15.18V11zM4.27 3 3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.42 2.72 6.23 6 6.72V21h2v-3.28c.99-.15 1.9-.53 2.68-1.07L19.73 21 21 19.73 4.27 3zM15 10.17V5c0-1.66-1.34-3-3-3-1.36 0-2.5.91-2.87 2.15L15 10.17z" />
                   </svg>
-                  Muted
+                  {tr.muted}
                 </span>
               )}
               {otherSilencerOn && (
@@ -870,7 +1040,7 @@ export default function CallManager({ user, request }) {
                   <svg viewBox="0 0 24 24" fill="currentColor" width="13" height="13" aria-hidden="true">
                     <path d="M4.27 3 3 4.27 19.73 21 21 19.73 4.27 3zM3 9v6h4l5 5v-6.73L7.73 9H3zm9-5-2.1 2.1L12 8.2V4zm5.5 8c0-1.77-1-3.29-2.5-4.03v2.2l2.45 2.45c.03-.2.05-.41.05-.62z" />
                   </svg>
-                  Silencer
+                  {tr.silenced}
                 </span>
               )}
             </div>
@@ -883,7 +1053,7 @@ export default function CallManager({ user, request }) {
               <button
                 className={`call-action call-secondary ${localMicOn ? '' : 'is-off'}`}
                 onClick={toggleMicrophone}
-                title={localMicOn ? 'Mute microphone' : 'Unmute microphone'}
+                title={localMicOn ? tr.muteMicrophone : tr.unmuteMicrophone}
               >
                 {localMicOn ? (
                   <svg viewBox="0 0 24 24" fill="currentColor" width="23" height="23">
@@ -898,7 +1068,7 @@ export default function CallManager({ user, request }) {
               <button
                 className={`call-action call-secondary ${localCameraOn ? '' : 'is-off'}`}
                 onClick={toggleCamera}
-                title={localCameraOn ? 'Turn camera off' : 'Turn camera on'}
+                title={localCameraOn ? tr.turnCameraOff : tr.turnCameraOn}
               >
                 {localCameraOn ? (
                   <svg viewBox="0 0 24 24" fill="currentColor" width="24" height="24">
@@ -913,7 +1083,7 @@ export default function CallManager({ user, request }) {
               <button
                 className={`call-action call-secondary ${speakerOn ? 'is-off' : ''}`}
                 onClick={toggleSpeaker}
-                title={speakerOn ? 'Turn speaker off' : 'Turn speaker on'}
+                title={speakerOn ? tr.turnSpeakerOff : tr.turnSpeakerOn}
               >
                 {speakerOn ? (
                   <svg viewBox="0 0 24 24" fill="currentColor" width="24" height="24">
@@ -928,7 +1098,7 @@ export default function CallManager({ user, request }) {
               <button
                 className={`call-action call-secondary ${remoteSilenced ? 'is-off' : ''}`}
                 onClick={toggleRemoteSilencer}
-                title={remoteSilenced ? 'Unsilence call audio' : 'Silence call audio'}
+                title={remoteSilenced ? tr.unsilenceCallAudio : tr.silenceCallAudio}
               >
                 {remoteSilenced ? (
                   <svg viewBox="0 0 24 24" fill="currentColor" width="24" height="24">
@@ -943,7 +1113,7 @@ export default function CallManager({ user, request }) {
             </>
           )}
           {isIncomingRinging && (
-            <button className="call-action call-accept" onClick={acceptCall} title="Accept call">
+            <button className="call-action call-accept" onClick={acceptCall} title={tr.acceptCall}>
               <svg viewBox="0 0 24 24" fill="currentColor" width="24" height="24">
                 <path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1C10.61 21 3 13.39 3 4c0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.24.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z" />
               </svg>
@@ -952,7 +1122,7 @@ export default function CallManager({ user, request }) {
           <button
             className="call-action call-decline"
             onClick={closeOrEndCall}
-            title={isActive ? 'End call' : 'Decline call'}
+            title={isActive ? tr.endCall : tr.declineCall}
           >
             <svg viewBox="0 0 24 24" fill="currentColor" width="25" height="25">
               <path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9l-2.7 1.35c-.49.24-1.08.05-1.34-.44L1.2 11.4c-.24-.47-.1-1.04.33-1.34C4.5 7.98 8.1 7 12 7s7.5.98 10.47 3.06c.43.3.57.87.33 1.34l-1.6 3.23c-.25.49-.84.68-1.34.44l-2.7-1.35c-.34-.17-.56-.52-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z" />

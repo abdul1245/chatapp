@@ -61,7 +61,7 @@ const clearChatForUser = async (chatId, uid) => {
   await commitIfNeeded(true)
 }
 
-export default function Sidebar({ user, selectedChat, onSelectChat, onLogout, onSettings }) {
+export default function Sidebar({ user, selectedChat, onSelectChat, onSettings }) {
   const { tr } = useAppContext()
   const [chats, setChats]               = useState([])
   const [showModal, setShowModal]       = useState(false)
@@ -296,12 +296,6 @@ export default function Sidebar({ user, selectedChat, onSelectChat, onLogout, on
   <button className="icon-btn" title={tr.newChat} onClick={() => setShowModal(true)}>
     <svg viewBox="0 0 24 24" fill="currentColor" width="21" height="21">
       <path d="M19.005 3.175H4.674C3.642 3.175 3 3.789 3 4.821V21.02l3.544-3.514h12.461c1.033 0 2.064-1.06 2.064-2.093V4.821c-.001-1.032-1.032-1.646-2.064-1.646zm-4.989 9.869H13v2.016a.5.5 0 01-1 0v-2.016H9.99a.5.5 0 010-1H12V9.869a.5.5 0 011 0v2.175h2.016a.5.5 0 010 1z" />
-    </svg>
-  </button>
-  <button className="icon-btn" title={tr.logout} onClick={onLogout}>
-    <svg viewBox="0 0 24 24" fill="currentColor" width="19" height="19">
-      <path d="M16 13v-2H7V8l-5 4 5 4v-3z" />
-      <path d="M20 3h-9c-1.1 0-2 .9-2 2v4h2V5h9v14h-9v-4H9v4c0 1.1.9 2 2 2h9c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2z" />
     </svg>
   </button>
 </div>

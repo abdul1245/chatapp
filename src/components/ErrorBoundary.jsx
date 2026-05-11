@@ -20,7 +20,7 @@ export default class ErrorBoundary extends Component {
         <div className="auth-page">
           <div className="auth-card">
             <h1 className="auth-title">{tr.errorTitle}</h1>
-            <p className="auth-subtitle">{this.state.error.message || tr.errorDesc}</p>
+            <p className="auth-subtitle">{tr.errorDesc}</p>
             <button className="btn-primary" onClick={() => window.location.reload()}>
               {tr.reload}
             </button>

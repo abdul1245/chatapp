@@ -8,6 +8,7 @@ import Admin from './components/Admin'
 import ChatApp from './components/ChatApp'
 import BannedScreen from './components/BannedScreen'
 import { useAppContext } from './context/AppContext'
+import { deviceRef, markCurrentDeviceInactive, registerCurrentDevice } from './deviceSession'
 
 export function GtyLogo({ size = 48, wordmark = false }) {
   const logoId = useId().replace(/:/g, '')
@@ -81,6 +82,35 @@ export default function App() {
     return unsub
   }, [user, setLang, setTheme, setThemeColor])
 
+  useEffect(() => {
+    if (!user) return undefined
+    let unsubDevice = null
+    let active = true
+
+    registerCurrentDevice(user).then(deviceId => {
+      if (!active || !deviceId) return
+      unsubDevice = onSnapshot(deviceRef(db, user.uid, deviceId), snap => {
+        if (!snap.exists()) {
+          signOut(auth)
+          return
+        }
+        const data = snap.data()
+        if (data.forceLogoutAt?.toMillis?.() > sessionStart.current) {
+          markCurrentDeviceInactive(user).finally(() => signOut(auth))
+        }
+      })
+    })
+
+    const handlePageHide = () => markCurrentDeviceInactive(user)
+    window.addEventListener('pagehide', handlePageHide)
+
+    return () => {
+      active = false
+      unsubDevice?.()
+      window.removeEventListener('pagehide', handlePageHide)
+    }
+  }, [user])
+
   if (user === undefined) {
     return (
       <div className="loading-screen">
@@ -95,7 +125,7 @@ export default function App() {
       <BannedScreen
         moderation={moderation}
         onExpire={() => setModeration(null)}
-        onLogout={() => signOut(auth)}
+        onLogout={() => markCurrentDeviceInactive(user).finally(() => signOut(auth))}
       />
     )
   }

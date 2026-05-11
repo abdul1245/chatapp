@@ -1,15 +1,17 @@
 import { useState } from 'react'
+import { useAppContext } from '../context/AppContext'
 
 export default function PasswordInput({
-  showLabel = 'Show password',
-  hideLabel = 'Hide password',
+  showLabel,
+  hideLabel,
   wrapperClassName = '',
   ...inputProps
 }) {
+  const { tr } = useAppContext()
   const [visible, setVisible] = useState(false)
   const label = visible
-    ? (hideLabel || 'Hide password')
-    : (showLabel || 'Show password')
+    ? (hideLabel || tr.hidePassword)
+    : (showLabel || tr.showPassword)
 
   return (
     <div className={`password-input ${wrapperClassName}`.trim()}>

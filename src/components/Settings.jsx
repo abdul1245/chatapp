@@ -4,17 +4,23 @@ import {
   reauthenticateWithCredential,
   EmailAuthProvider,
 } from 'firebase/auth'
-import { collection, doc, getDoc, getDocs, updateDoc, setDoc, deleteDoc, query, where } from 'firebase/firestore'
+import {
+  collection, doc, getDoc, getDocs, onSnapshot, orderBy,
+  updateDoc, setDoc, deleteDoc, query, serverTimestamp, where,
+} from 'firebase/firestore'
 import { auth, db } from '../firebase'
 import { sendAccountEmail, sendEmailCode, getErrorMessage } from '../email'
 import { useAppContext } from '../context/AppContext'
 import { buildBirthday, buildDisplayName, formatBirthday, parseBirthday } from '../profile'
 import PasswordInput from './PasswordInput'
+import { getDeviceId } from '../deviceSession'
+import { maskEmail } from '../privacy'
 
 const genCode = () => String(Math.floor(10000 + Math.random() * 90000))
 const codeKey = email => email.replace(/\./g, ',').replace(/@/g, '--at--') + '_s'
 const passwordCodeKey = email => `${codeKey(email)}_pw`
 const changeEmailCodeKey = email => `${codeKey(email)}_change_email`
+const deviceLogoutCodeKey = (uid, deviceId) => `device_logout_${uid}_${deviceId}`
 const PASSWORD_MASK = '********'
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const sendAccountEmailQuietly = (...args) =>
@@ -41,7 +47,7 @@ async function getProfile(uid) {
   return snap.exists() ? snap.data() : null
 }
 
-export default function Settings({ user, onClose }) {
+export default function Settings({ user, onClose, onLogout }) {
   const { lang, setLang, theme, setTheme, themeColor, setThemeColor, themeColors, tr, languages } = useAppContext()
   const [tab, setTab] = useState('information')
   const [infoMode, setInfoMode] = useState(null)
@@ -101,6 +107,7 @@ export default function Settings({ user, onClose }) {
             mode={infoMode}
             onModeChange={setInfoMode}
             onUpdated={refreshProfile}
+            onLogout={onLogout}
           />
         )}
 
@@ -161,9 +168,22 @@ export default function Settings({ user, onClose }) {
   )
 }
 
-function InformationSettings({ user, profile, tr, mode, onModeChange, onUpdated }) {
+function InformationSettings({ user, profile, tr, mode, onModeChange, onUpdated, onLogout }) {
   const fullName = buildDisplayName(profile) || profile?.phoneNumber || '-'
+  const text = (key, values = {}) =>
+    Object.entries(values).reduce((out, [name, value]) => out.replace(`{${name}}`, value), tr[key] || '')
   const [revealedPassword, setRevealedPassword] = useState('')
+  const [confirmLogout, setConfirmLogout] = useState(false)
+  const [devices, setDevices] = useState([])
+  const [deviceToLogout, setDeviceToLogout] = useState(null)
+  const currentDeviceId = getDeviceId()
+
+  useEffect(() => {
+    const q = query(collection(db, 'users', user.uid, 'devices'), orderBy('loggedInAt', 'desc'))
+    return onSnapshot(q, snap => {
+      setDevices(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+    })
+  }, [user.uid])
 
   return (
     <div className="settings-content">
@@ -201,6 +221,19 @@ function InformationSettings({ user, profile, tr, mode, onModeChange, onUpdated 
             onShowPassword={() => onModeChange('showPassword')}
             onChangePassword={() => onModeChange('password')}
           />
+        </div>
+
+        <DeviceList
+          devices={devices}
+          currentDeviceId={currentDeviceId}
+          onLogoutDevice={setDeviceToLogout}
+          tr={tr}
+        />
+
+        <div className="settings-account-actions">
+          <button className="btn-danger settings-logout-btn" onClick={() => setConfirmLogout(true)}>
+            {tr.logout}
+          </button>
         </div>
       </div>
 
@@ -268,6 +301,227 @@ function InformationSettings({ user, profile, tr, mode, onModeChange, onUpdated 
           onBack={() => onModeChange(null)}
           onUpdated={onUpdated}
         />
+      )}
+
+      {confirmLogout && (
+        <div className="profile-confirm-overlay" onClick={() => setConfirmLogout(false)}>
+          <div className="profile-confirm-card" onClick={e => e.stopPropagation()}>
+            <h3>{tr.logout}</h3>
+            <p>{tr.logoutConfirm}</p>
+            <div className="profile-confirm-actions">
+              <button className="btn-secondary" onClick={() => setConfirmLogout(false)}>{tr.cancel}</button>
+              <button className="btn-danger settings-confirm-logout-btn" onClick={onLogout}>
+                {tr.logout}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deviceToLogout && (
+        <DeviceLogoutVerifyModal
+          user={user}
+          profile={profile}
+          device={deviceToLogout}
+          tr={tr}
+          text={text}
+          onClose={() => setDeviceToLogout(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+function formatDeviceDate(value) {
+  const date = value?.toDate?.() ?? (value ? new Date(value) : null)
+  return date ? date.toLocaleString() : '-'
+}
+
+function DeviceList({ devices, currentDeviceId, onLogoutDevice, tr }) {
+  return (
+    <div className="settings-devices-panel">
+      <div className="settings-panel-head">
+        <div className="settings-panel-title">{tr.loggedInDevices}</div>
+        <div className="settings-inline-note">{tr.loggedInDevicesDesc}</div>
+      </div>
+      {devices.length === 0 ? (
+        <div className="sidebar-empty">{tr.noDevicesRecorded}</div>
+      ) : (
+        <div className="device-list">
+          {devices.map(device => (
+            <div className="device-row" key={device.id}>
+              <div className="device-row-main">
+                <div className="device-row-title">
+                  {device.deviceLabel || tr.unknownDevice}
+                  {device.id === currentDeviceId && <span className="device-pill">{tr.thisDevice}</span>}
+                  <span className={`device-pill ${device.active ? 'active' : ''}`}>{device.active ? tr.statusActive : tr.deviceStatusLoggedOut}</span>
+                </div>
+                <div className="device-row-meta">
+                  {device.country || tr.unknownCountry} · {formatDeviceDate(device.loggedInAt)}
+                </div>
+                <div className="device-row-meta">{device.timezone || device.platform || '-'}</div>
+              </div>
+              {device.active && (
+                <button className="action-btn danger" onClick={() => onLogoutDevice(device)}>
+                  {tr.logout}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SettingsVerificationModal({ title, description, tr, onClose, children }) {
+  const { lang, languages } = useAppContext()
+  const dir = languages.find(l => l.code === lang)?.dir || 'ltr'
+
+  return (
+    <div
+      className="settings-code-modal-overlay"
+      onClick={e => {
+        e.stopPropagation()
+        onClose()
+      }}
+    >
+      <div
+        className="settings-code-modal"
+        dir={dir}
+        lang={lang}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-code-modal-title"
+        onClick={e => e.stopPropagation()}
+      >
+        <button
+          type="button"
+          className="icon-btn settings-code-modal-close"
+          onClick={onClose}
+          aria-label={tr.close || tr.cancel}
+        >
+          x
+        </button>
+        <div className="verify-header">
+          <p className="verify-title" id="settings-code-modal-title">{title}</p>
+          {description && <p className="verify-sub">{description}</p>}
+        </div>
+        {children}
+      </div>
+    </div>
+  )
+}
+
+function DeviceLogoutVerifyModal({ user, profile, device, tr, text, onClose }) {
+  const [step, setStep] = useState('intro')
+  const [code, setCode] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const { left, reset, fmt } = useCountdown(60)
+  const email = profile?.contactEmail || ''
+
+  const sendCode = async () => {
+    setLoading(true)
+    setError('')
+    try {
+      if (!email) throw new Error(tr.noEmailOnFile)
+      const nextCode = genCode()
+      await setDoc(doc(db, 'verificationCodes', deviceLogoutCodeKey(user.uid, device.id)), {
+        code: nextCode,
+        expiresAt: new Date(Date.now() + 60_000),
+        uid: user.uid,
+        deviceId: device.id,
+        purpose: 'device-logout',
+      })
+      await sendEmailCode(email, nextCode, 1, profile?.language || 'en')
+      reset(60)
+      setStep('code')
+    } catch (e) {
+      setError(getErrorMessage(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const verifyAndLogout = async e => {
+    e.preventDefault()
+    setLoading(true)
+    setError('')
+    try {
+      const codeDoc = doc(db, 'verificationCodes', deviceLogoutCodeKey(user.uid, device.id))
+      const snap = await getDoc(codeDoc)
+      if (!snap.exists()) throw new Error(tr.codeNotFound)
+      const data = snap.data()
+      const exp = data.expiresAt?.toMillis?.() ?? new Date(data.expiresAt).getTime()
+      if (Date.now() > exp) throw new Error(tr.codeExpired)
+      if (data.code !== code.trim()) throw new Error(tr.wrongCode)
+
+      await updateDoc(doc(db, 'users', user.uid, 'devices', device.id), {
+        active: false,
+        forcedLogout: true,
+        forceLogoutAt: serverTimestamp(),
+        loggedOutAt: serverTimestamp(),
+        lastSeenAt: serverTimestamp(),
+      })
+      await deleteDoc(codeDoc)
+      onClose()
+    } catch (e) {
+      setError(getErrorMessage(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const closeCodePrompt = () => {
+    setCode('')
+    setError('')
+    setStep('intro')
+  }
+
+  return (
+    <div className="profile-confirm-overlay" onClick={onClose}>
+      <div className="profile-confirm-card" onClick={e => e.stopPropagation()}>
+        <h3>{tr.logOutDeviceTitle}</h3>
+        <p>{text('logOutDeviceIdentity', { device: device.deviceLabel || tr.thisDeviceFallback })}</p>
+        {step === 'intro' && error && <div className="error-banner">{error}</div>}
+        <div className="profile-confirm-actions">
+          <button className="btn-secondary" onClick={onClose}>{tr.cancel}</button>
+          <button className="btn-primary settings-confirm-logout-btn" onClick={sendCode} disabled={loading}>
+            {loading ? '...' : tr.sendCode}
+          </button>
+        </div>
+      </div>
+
+      {step === 'code' && (
+        <SettingsVerificationModal
+          title={tr.enterCode}
+          description={text('enterCodeSentTo', { email: maskEmail(email) })}
+          tr={tr}
+          onClose={closeCodePrompt}
+        >
+          <form onSubmit={verifyAndLogout} className="settings-stack">
+            <input
+              type="text"
+              inputMode="numeric"
+              maxLength={5}
+              value={code}
+              onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 5))}
+              placeholder={tr.codePlaceholder}
+              autoFocus
+            />
+            {left > 0 ? <p className="code-timer">{tr.timeLeft}: <strong>{fmt}</strong></p> : <div className="error-banner">{tr.codeExpired}</div>}
+            {error && <div className="error-banner">{error}</div>}
+            <div className="settings-inline-actions settings-code-actions">
+              <button type="submit" className="btn-danger settings-confirm-logout-btn" disabled={loading || code.length < 5 || left === 0}>
+                {loading ? '...' : tr.verifyAndLogOut}
+              </button>
+              <button type="button" className="btn-secondary" onClick={sendCode} disabled={loading}>
+                {tr.resendCode}
+              </button>
+            </div>
+          </form>
+        </SettingsVerificationModal>
       )}
     </div>
   )
@@ -371,25 +625,26 @@ function ShowPasswordFlow({ profile, tr, onBack, onReveal }) {
 
   if (step === 3) {
     return (
-      <div className="settings-panel">
+      <SettingsVerificationModal
+        title={tr.showPassword}
+        description={tr.passwordVisibleFor}
+        tr={tr}
+        onClose={onBack}
+      >
         <div className="success-banner">{tr.passwordVisibleFor} 00:30</div>
-        <button className="link-btn" onClick={onBack}>{tr.back}</button>
-      </div>
+      </SettingsVerificationModal>
     )
   }
 
   return (
-    <div className="settings-panel">
-      <div className="settings-panel-head">
-        <button className="link-btn" onClick={onBack}>{tr.back}</button>
-        <div className="settings-panel-title">{tr.showPassword}</div>
-      </div>
-
+    <SettingsVerificationModal
+      title={tr.showPassword}
+      description={step === 1 ? tr.confirmIdentityEmail : tr.verifyToShowPassword}
+      tr={tr}
+      onClose={onBack}
+    >
       {step === 1 && (
         <div className="settings-stack">
-          <div className="settings-inline-note">
-            {tr.confirmIdentityEmail}
-          </div>
           {error && <div className="error-banner">{error}</div>}
           <button className="btn-primary" onClick={sendCode} disabled={loading}>
             {loading ? '...' : tr.sendCode}
@@ -399,25 +654,22 @@ function ShowPasswordFlow({ profile, tr, onBack, onReveal }) {
 
       {step === 2 && (
         <form className="settings-stack" onSubmit={verifyCode}>
-          <div className="field">
-            <label>{tr.enterCode}</label>
-            <input
-              type="text"
-              inputMode="numeric"
-              maxLength={5}
-              value={code}
-              onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 5))}
-              placeholder={tr.codePlaceholder}
-              autoFocus
-            />
-          </div>
+          <input
+            type="text"
+            inputMode="numeric"
+            maxLength={5}
+            value={code}
+            onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 5))}
+            placeholder={tr.codePlaceholder}
+            autoFocus
+          />
           {left > 0 ? (
             <p className="code-timer">{tr.timeLeft}: <strong>{fmt}</strong></p>
           ) : (
             <div className="error-banner">{tr.codeExpired}</div>
           )}
           {error && <div className="error-banner">{error}</div>}
-          <div className="settings-inline-actions">
+          <div className="settings-inline-actions settings-code-actions">
             <button type="submit" className="btn-primary" disabled={loading || left === 0 || code.length < 5}>
               {loading ? '...' : tr.continueBtn}
             </button>
@@ -427,7 +679,7 @@ function ShowPasswordFlow({ profile, tr, onBack, onReveal }) {
           </div>
         </form>
       )}
-    </div>
+    </SettingsVerificationModal>
   )
 }
 
@@ -663,22 +915,26 @@ function ChangePassword({ user, profile, tr, onBack, onUpdated }) {
 
   if (done) {
     return (
-      <div className="settings-panel">
+      <SettingsVerificationModal
+        title={tr.changePassword}
+        description={tr.passwordChanged}
+        tr={tr}
+        onClose={onBack}
+      >
         <div className="success-banner">{tr.passwordChanged}</div>
-        <button className="link-btn" onClick={onBack}>{tr.back}</button>
-      </div>
+      </SettingsVerificationModal>
     )
   }
 
   return (
-    <div className="settings-panel">
-      <div className="settings-panel-head">
-        <button className="link-btn" onClick={onBack}>{tr.back}</button>
-        <div className="settings-panel-title">{tr.changePassword}</div>
-      </div>
+    <SettingsVerificationModal
+      title={tr.changePassword}
+      description={step === 1 ? tr.codeSending : tr.passwordActionHint}
+      tr={tr}
+      onClose={onBack}
+    >
       {step === 1 && (
         <div className="settings-stack">
-          <div className="settings-inline-note">{tr.codeSending}</div>
           {error && <div className="error-banner">{error}</div>}
           <button className="btn-primary" onClick={sendCode} disabled={loading}>
             {loading ? '...' : tr.sendCode}
@@ -687,18 +943,15 @@ function ChangePassword({ user, profile, tr, onBack, onUpdated }) {
       )}
       {step === 2 && (
         <form className="settings-stack" onSubmit={submit}>
-          <div className="field">
-            <label>{tr.enterCode}</label>
-            <input
-              type="text"
-              inputMode="numeric"
-              maxLength={5}
-              value={code}
-              onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 5))}
-              placeholder={tr.codePlaceholder}
-              autoFocus
-            />
-          </div>
+          <input
+            type="text"
+            inputMode="numeric"
+            maxLength={5}
+            value={code}
+            onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 5))}
+            placeholder={tr.codePlaceholder}
+            autoFocus
+          />
           {left > 0 ? (
             <p className="code-timer">{tr.timeLeft}: <strong>{fmt}</strong></p>
           ) : (
@@ -725,7 +978,7 @@ function ChangePassword({ user, profile, tr, onBack, onUpdated }) {
             />
           </div>
           {error && <div className="error-banner">{error}</div>}
-          <div className="settings-inline-actions">
+          <div className="settings-inline-actions settings-code-actions">
             <button type="submit" className="btn-primary" disabled={loading || left === 0}>
               {loading ? '...' : tr.verifyAndSave}
             </button>
@@ -735,7 +988,7 @@ function ChangePassword({ user, profile, tr, onBack, onUpdated }) {
           </div>
         </form>
       )}
-    </div>
+    </SettingsVerificationModal>
   )
 }
 
@@ -846,27 +1099,34 @@ function ChangeEmailVerified({ user, profile, tr, onBack, onUpdated }) {
 
   if (done) {
     return (
-      <div className="settings-panel">
+      <SettingsVerificationModal
+        title={tr.changeEmailTitle}
+        description={tr.emailChanged}
+        tr={tr}
+        onClose={onBack}
+      >
         <div className="success-banner">{tr.emailChanged}</div>
-        <button className="link-btn" onClick={onBack}>{tr.back}</button>
-      </div>
+      </SettingsVerificationModal>
     )
   }
 
   return (
-    <div className="settings-panel">
-      <div className="settings-panel-head">
-        <button className="link-btn" onClick={onBack}>{tr.back}</button>
-        <div className="settings-panel-title">{tr.changeEmailTitle}</div>
-      </div>
-
+    <SettingsVerificationModal
+      title={tr.changeEmailTitle}
+      description={
+        step === 1
+          ? tr.confirmIdentityEmail
+          : step === 2
+            ? `${tr.codeSentTo} ${maskEmail(currentEmail) || '-'}`
+            : tr.newEmail
+      }
+      tr={tr}
+      onClose={onBack}
+    >
       {step === 1 && (
         <div className="settings-stack">
           <div className="settings-inline-note">
-            {tr.confirmIdentityEmail}
-          </div>
-          <div className="settings-inline-note">
-            <strong>{currentEmail || '-'}</strong>
+            <strong>{maskEmail(currentEmail) || '-'}</strong>
           </div>
           {error && <div className="error-banner">{error}</div>}
           <button className="btn-primary" onClick={sendCode} disabled={loading}>
@@ -877,25 +1137,22 @@ function ChangeEmailVerified({ user, profile, tr, onBack, onUpdated }) {
 
       {step === 2 && (
         <form className="settings-stack" onSubmit={verifyIdentity}>
-          <div className="field">
-            <label>{tr.enterCode}</label>
-            <input
-              type="text"
-              inputMode="numeric"
-              maxLength={5}
-              value={code}
-              onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 5))}
-              placeholder={tr.codePlaceholder}
-              autoFocus
-            />
-          </div>
+          <input
+            type="text"
+            inputMode="numeric"
+            maxLength={5}
+            value={code}
+            onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 5))}
+            placeholder={tr.codePlaceholder}
+            autoFocus
+          />
           {left > 0 ? (
             <p className="code-timer">{tr.timeLeft}: <strong>{fmt}</strong></p>
           ) : (
             <div className="error-banner">{tr.codeExpired}</div>
           )}
           {error && <div className="error-banner">{error}</div>}
-          <div className="settings-inline-actions">
+          <div className="settings-inline-actions settings-code-actions">
             <button type="submit" className="btn-primary" disabled={loading || left === 0 || code.length < 5}>
               {loading ? '...' : tr.continueBtn}
             </button>
@@ -935,6 +1192,6 @@ function ChangeEmailVerified({ user, profile, tr, onBack, onUpdated }) {
           </button>
         </form>
       )}
-    </div>
+    </SettingsVerificationModal>
   )
 }
