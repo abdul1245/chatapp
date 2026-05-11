@@ -25,6 +25,8 @@ import { GtyLogo } from '../App'
 import { LangThemePicker } from './Login'
 import { useAppContext } from '../context/AppContext'
 import { buildBirthday, buildDisplayName, formatBirthday, parseBirthday } from '../profile'
+import PasswordInput from './PasswordInput'
+import { sendAccountEmail } from '../email'
 
 const ADMIN_PASS = import.meta.env.VITE_ADMIN_PASSWORD
 
@@ -52,6 +54,10 @@ const emptyNewUser = {
 const isAdminPhone = value => /^\d+$/.test(value.trim())
 const deletedLogPackageId = 'lastDeleted'
 const batchLimit = 450
+const sendAccountEmailQuietly = (...args) =>
+  args[0]
+    ? sendAccountEmail(...args).catch(err => console.warn('Account email failed:', err))
+    : Promise.resolve()
 
 export default function Admin() {
   const { tr, lang, theme, themeColor, languages } = useAppContext()
@@ -208,6 +214,10 @@ export default function Admin() {
 
       await setDoc(doc(secondaryDb, 'users', cred.user.uid), userDoc)
       await logAction('user_created', { id: cred.user.uid, phoneNumber }, { contactEmail })
+      await sendAccountEmailQuietly(contactEmail, 'registered', newUserForm.language, {
+        phoneNumber,
+        newEmail: contactEmail,
+      })
       await signOut(secondaryAuth)
       setNewUserForm({ ...emptyNewUser, language: lang })
       await refresh()
@@ -414,6 +424,25 @@ export default function Admin() {
         logoutSignal: serverTimestamp(),
       })
       await logAction('account_updated', editTarget, changes)
+      if (changes.contactEmail) {
+        await Promise.all([
+          sendAccountEmailQuietly(changes.contactEmail.from, 'emailChangedOld', editTarget.language || 'en', {
+            phoneNumber: editTarget.phoneNumber,
+            oldEmail: changes.contactEmail.from,
+            newEmail: changes.contactEmail.to,
+          }),
+          sendAccountEmailQuietly(changes.contactEmail.to, 'emailChangedNew', editTarget.language || 'en', {
+            phoneNumber: editTarget.phoneNumber,
+            oldEmail: changes.contactEmail.from,
+            newEmail: changes.contactEmail.to,
+          }),
+        ])
+      }
+      if (changes.password) {
+        await sendAccountEmailQuietly(editTarget.contactEmail, 'passwordChanged', editTarget.language || 'en', {
+          phoneNumber: editTarget.phoneNumber,
+        })
+      }
       if (signedInForEdit) await signOut(secondaryAuth)
       setEditTarget(null)
       setEditForm(emptyEdit)
@@ -559,11 +588,12 @@ export default function Admin() {
           <GtyLogo size={56} />
           <h1 className="auth-title">{tr.adminPanel}</h1>
           <form onSubmit={enterAdmin} className="auth-form">
-            <input
-              type="password"
+            <PasswordInput
               value={adminInput}
               onChange={e => setAdminInput(e.target.value)}
               placeholder={tr.adminPasswordPlaceholder}
+              showLabel={tr.showPassword}
+              hideLabel={tr.hidePassword}
             />
             {feedback.msg && <div className="error-banner">{feedback.msg}</div>}
             <button type="submit" className="btn-primary">{tr.enter}</button>
@@ -665,11 +695,13 @@ export default function Admin() {
                 placeholder={tr.emailPlaceholder}
                 required
               />
-              <input
-                type="password"
+              <PasswordInput
                 value={newUserForm.password}
                 onChange={e => setNewUserForm(f => ({ ...f, password: e.target.value }))}
                 placeholder={tr.minPasswordPlaceholder}
+                showLabel={tr.showPassword}
+                hideLabel={tr.hidePassword}
+                wrapperClassName="admin-password-field"
                 required
               />
               <select
@@ -859,13 +891,23 @@ export default function Admin() {
             ) : (
               <div className="field">
                 <label>{editForm.type === 'email' ? tr.newEmail : tr.newPassword}</label>
-                <input
-                  type={editForm.type === 'email' ? 'email' : 'text'}
-                  value={editForm.value}
-                  onChange={e => setEditForm(f => ({ ...f, value: e.target.value }))}
-                  placeholder={editForm.type === 'password' ? tr.minPasswordPlaceholder : ''}
-                  required
-                />
+                {editForm.type === 'password' ? (
+                  <PasswordInput
+                    value={editForm.value}
+                    onChange={e => setEditForm(f => ({ ...f, value: e.target.value }))}
+                    placeholder={tr.minPasswordPlaceholder}
+                    showLabel={tr.showPassword}
+                    hideLabel={tr.hidePassword}
+                    required
+                  />
+                ) : (
+                  <input
+                    type="email"
+                    value={editForm.value}
+                    onChange={e => setEditForm(f => ({ ...f, value: e.target.value }))}
+                    required
+                  />
+                )}
               </div>
             )}
             <div className="modal-footer">

@@ -9,6 +9,9 @@ import { buildDisplayName } from '../profile'
 
 const AGORA_APP_ID = import.meta.env.VITE_AGORA_APP_ID || '44b55e8620e8421b9be760862e6a2a7e'
 const OPEN_STATUSES = new Set(['ringing', 'active'])
+const RING_TIMEOUT_MS = 30_000
+const REMOTE_NORMAL_VOLUME = 55
+const REMOTE_SPEAKER_VOLUME = 100
 
 const millisFromTimestamp = value => value?.toMillis?.() ?? 0
 const callKindText = callType => `${callType === 'video' ? 'video' : 'voice'} call`
@@ -21,6 +24,7 @@ const callStatusText = status => ({
   accepted: 'accepted',
   declined: 'declined',
   canceled: 'canceled',
+  unanswered: 'not answered',
   ended: 'accepted and ended',
   failed: 'failed',
   left: 'ended',
@@ -33,10 +37,16 @@ const buildCallMessageText = (call, callStatus) => {
 const getFinalCallStatus = (call, reason) => {
   if (reason === 'declined') return 'declined'
   if (reason === 'canceled') return 'canceled'
+  if (reason === 'unanswered') return 'unanswered'
   if (reason === 'media-failed') return 'failed'
   if (reason === 'left') return call.acceptedAt ? 'left' : 'canceled'
   return call.acceptedAt ? 'ended' : 'canceled'
 }
+
+const getRingingStartedAt = call =>
+  millisFromTimestamp(call?.createdAt) || millisFromTimestamp(call?.updatedAt) || Date.now()
+const getRemotePlaybackVolume = (silenced, speaker) =>
+  silenced ? 0 : speaker ? REMOTE_SPEAKER_VOLUME : REMOTE_NORMAL_VOLUME
 
 const describeMediaError = (err, callType) => {
   const code = err?.code || err?.name || ''
@@ -105,8 +115,10 @@ const describeCameraError = err => {
 }
 
 const findLocalTrack = (tracks, mediaType) => tracks.find(track => track.trackMediaType === mediaType)
+const videoCorners = ['top-left', 'top-right', 'bottom-left', 'bottom-right']
+const oppositeVideoSource = source => source === 'local' ? 'remote' : 'local'
 
-function RemoteVideo({ user }) {
+function RemoteVideo({ user, className = 'call-video call-video-remote' }) {
   const ref = useRef(null)
 
   useEffect(() => {
@@ -115,7 +127,7 @@ function RemoteVideo({ user }) {
     return () => user.videoTrack?.stop()
   }, [user])
 
-  return <div className="call-video call-video-remote" ref={ref} />
+  return <div className={className} ref={ref} />
 }
 
 export default function CallManager({ user, request }) {
@@ -127,17 +139,27 @@ export default function CallManager({ user, request }) {
   const [localVideoReady, setLocalVideoReady] = useState(false)
   const [localMicOn, setLocalMicOn] = useState(true)
   const [localCameraOn, setLocalCameraOn] = useState(false)
-  const [remoteAudioOn, setRemoteAudioOn] = useState(true)
+  const [speakerOn, setSpeakerOn] = useState(false)
+  const [remoteSilenced, setRemoteSilenced] = useState(false)
   const [mediaNotice, setMediaNotice] = useState('')
+  const [ringTimeLeft, setRingTimeLeft] = useState(RING_TIMEOUT_MS)
+  const [featuredVideo, setFeaturedVideo] = useState('remote')
+  const [previewCorner, setPreviewCorner] = useState('bottom-right')
+  const [previewDrag, setPreviewDrag] = useState(null)
 
   const clientRef = useRef(null)
   const localTracksRef = useRef([])
   const remoteAudioTracksRef = useRef(new Map())
-  const remoteAudioOnRef = useRef(true)
+  const speakerOnRef = useRef(false)
+  const remoteSilencedRef = useRef(false)
   const joinedCallIdRef = useRef(null)
   const joiningCallIdRef = useRef(null)
   const localVideoRef = useRef(null)
+  const callStageRef = useRef(null)
+  const previewRef = useRef(null)
   const handledRequestIdRef = useRef(null)
+  const autoEndingCallIdRef = useRef(null)
+  const previewMovedRef = useRef(false)
 
   const currentCallRef = useRef(null)
   useEffect(() => {
@@ -164,16 +186,51 @@ export default function CallManager({ user, request }) {
   const isActive = currentCall?.status === 'active'
   const isVideoCall = currentCall?.type === 'video'
   const showVideoStage = isActive && (isVideoCall || localCameraOn || remoteUsers.length > 0)
+  const remoteVideoUser = remoteUsers.find(remoteUser => remoteUser.videoTrack) || null
+  const hasRemoteVideo = Boolean(remoteVideoUser)
+  const hasLocalVideo = Boolean(localCameraOn && localVideoReady)
+  const featuredSource = featuredVideo === 'local' && hasLocalVideo ? 'local'
+    : featuredVideo === 'remote' && hasRemoteVideo ? 'remote'
+    : hasRemoteVideo ? 'remote'
+    : hasLocalVideo ? 'local'
+    : 'waiting'
+  const previewSource = oppositeVideoSource(featuredSource)
+  const showPreview = showVideoStage && (
+    (previewSource === 'local' && hasLocalVideo)
+    || (previewSource === 'remote' && hasRemoteVideo)
+    || (featuredSource === 'remote' && !hasLocalVideo)
+  )
+  const otherControls = otherUserId ? currentCall?.participantControls?.[otherUserId] : null
+  const otherMicMuted = Boolean(otherControls?.micMuted)
+  const otherSilencerOn = Boolean(otherControls?.silencerOn)
 
   useEffect(() => {
-    remoteAudioOnRef.current = remoteAudioOn
+    speakerOnRef.current = speakerOn
+    remoteSilencedRef.current = remoteSilenced
+    const volume = getRemotePlaybackVolume(remoteSilenced, speakerOn)
     remoteAudioTracksRef.current.forEach(track => {
-      track.setVolume?.(remoteAudioOn ? 100 : 0)
-      if (remoteAudioOn) track.play?.()
+      track.setVolume?.(volume)
+      track.play?.()
     })
-  }, [remoteAudioOn])
+  }, [remoteSilenced, speakerOn])
 
-  const updateCallAndMessage = useCallback(async (call, callPatch, callStatus) => {
+  useEffect(() => {
+    if (!showVideoStage) return
+    if (featuredVideo === 'remote' && !hasRemoteVideo && hasLocalVideo) {
+      setFeaturedVideo('local')
+    } else if (featuredVideo === 'local' && !hasLocalVideo && hasRemoteVideo) {
+      setFeaturedVideo('remote')
+    }
+  }, [featuredVideo, hasLocalVideo, hasRemoteVideo, showVideoStage])
+
+  useEffect(() => {
+    if (!activeCallId) return
+    setFeaturedVideo('remote')
+    setPreviewCorner('bottom-right')
+    setPreviewDrag(null)
+  }, [activeCallId])
+
+  const updateCallAndMessage = useCallback(async (call, callPatch, callStatus, options = {}) => {
     const callRef = doc(db, 'calls', call.id)
     const hasCallMessage = Boolean(call.chatId && call.callMessageId)
     const chatRef = hasCallMessage ? doc(db, 'chats', call.chatId) : null
@@ -189,11 +246,14 @@ export default function CallManager({ user, request }) {
       callStatus,
     }
 
-    await runTransaction(db, async transaction => {
+    return await runTransaction(db, async transaction => {
+      const callSnap = await transaction.get(callRef)
       const chatSnap = chatRef ? await transaction.get(chatRef) : null
+      if (!callSnap.exists()) return false
+      if (options.expectedStatus && callSnap.data().status !== options.expectedStatus) return false
       transaction.update(callRef, callPatch)
 
-      if (!messageRef) return
+      if (!messageRef) return true
 
       transaction.update(messageRef, {
         text,
@@ -201,7 +261,7 @@ export default function CallManager({ user, request }) {
         updatedAt: serverTimestamp(),
       })
 
-      if (!chatSnap?.exists()) return
+      if (!chatSnap?.exists()) return true
 
       const currentLast = chatSnap.data().lastMessage
       if (!currentLast || currentLast.callId === call.id) {
@@ -211,8 +271,20 @@ export default function CallManager({ user, request }) {
           clearedFor: arrayRemove(call.callerId, call.receiverId),
         })
       }
+      return true
     })
   }, [])
+
+  const updateLocalCallControls = useCallback(patch => {
+    const call = currentCallRef.current
+    if (!call?.id) return Promise.resolve()
+    const updates = Object.fromEntries(
+      Object.entries(patch).map(([key, value]) => [`participantControls.${user.uid}.${key}`, value])
+    )
+    return updateDoc(doc(db, 'calls', call.id), updates).catch(err => {
+      console.warn('Call control state update failed:', err)
+    })
+  }, [user.uid])
 
   const leaveAgora = useCallback(async () => {
     localTracksRef.current.forEach(track => {
@@ -221,11 +293,13 @@ export default function CallManager({ user, request }) {
     })
     localTracksRef.current = []
     remoteAudioTracksRef.current.clear()
-    remoteAudioOnRef.current = true
+    speakerOnRef.current = false
+    remoteSilencedRef.current = false
     setLocalVideoReady(false)
     setLocalMicOn(true)
     setLocalCameraOn(false)
-    setRemoteAudioOn(true)
+    setSpeakerOn(false)
+    setRemoteSilenced(false)
     setMediaNotice('')
     setRemoteUsers([])
 
@@ -248,7 +322,7 @@ export default function CallManager({ user, request }) {
       try {
         await client.subscribe(remoteUser, mediaType)
         if (mediaType === 'audio' && remoteUser.audioTrack) {
-          remoteUser.audioTrack.setVolume?.(remoteAudioOnRef.current ? 100 : 0)
+          remoteUser.audioTrack.setVolume?.(getRemotePlaybackVolume(remoteSilencedRef.current, speakerOnRef.current))
           remoteUser.audioTrack.play()
           remoteAudioTracksRef.current.set(remoteUser.uid, remoteUser.audioTrack)
         }
@@ -279,19 +353,23 @@ export default function CallManager({ user, request }) {
   const endFirestoreCall = useCallback(async (reason = 'ended') => {
     const call = currentCallRef.current
     if (!call) return
+    let shouldCloseLocalCall = true
     try {
-      await updateCallAndMessage(call, {
+      const updated = await updateCallAndMessage(call, {
         status: 'ended',
         endReason: reason,
         endedBy: user.uid,
         endedAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
-      }, getFinalCallStatus(call, reason))
+      }, getFinalCallStatus(call, reason), reason === 'unanswered' ? { expectedStatus: 'ringing' } : {})
+      shouldCloseLocalCall = updated !== false
     } catch (err) {
       console.warn('Call end update failed:', err)
     } finally {
-      await leaveAgora()
-      setCurrentCall(null)
+      if (shouldCloseLocalCall) {
+        await leaveAgora()
+        setCurrentCall(null)
+      }
     }
   }, [leaveAgora, updateCallAndMessage, user.uid])
 
@@ -318,6 +396,7 @@ export default function CallManager({ user, request }) {
       setLocalCameraOn(hasVideoTrack)
       setLocalVideoReady(hasVideoTrack)
       setMediaNotice(videoError ? describeCameraError(videoError) : '')
+      updateLocalCallControls({ micMuted: false, silencerOn: remoteSilencedRef.current })
     } catch (err) {
       console.error('Agora join failed:', err)
       localTracksRef.current.forEach(track => {
@@ -338,7 +417,7 @@ export default function CallManager({ user, request }) {
         joiningCallIdRef.current = null
       }
     }
-  }, [endFirestoreCall, getClient, leaveAgora, user.uid])
+  }, [endFirestoreCall, getClient, leaveAgora, updateLocalCallControls, user.uid])
 
   useEffect(() => {
     const callsQuery = query(collection(db, 'calls'), where('participants', 'array-contains', user.uid))
@@ -383,6 +462,10 @@ export default function CallManager({ user, request }) {
           callerId: user.uid,
           receiverId: request.chat.otherId,
           participants: [user.uid, request.chat.otherId],
+          participantControls: {
+            [user.uid]: { micMuted: false, silencerOn: false },
+            [request.chat.otherId]: { micMuted: false, silencerOn: false },
+          },
           callerName,
           callerPhone: callerData.phoneNumber || '',
           callerPhoto: callerData.photoURL || '',
@@ -451,6 +534,27 @@ export default function CallManager({ user, request }) {
   }, [activeCallId, activeCallStatus])
 
   useEffect(() => {
+    if (activeCallStatus !== 'ringing' || !currentCall) {
+      autoEndingCallIdRef.current = null
+      return undefined
+    }
+
+    const startedAt = getRingingStartedAt(currentCall)
+    const tick = () => {
+      const remaining = Math.max(0, RING_TIMEOUT_MS - (Date.now() - startedAt))
+      setRingTimeLeft(remaining)
+      if (remaining <= 0 && autoEndingCallIdRef.current !== currentCall.id) {
+        autoEndingCallIdRef.current = currentCall.id
+        endFirestoreCall('unanswered')
+      }
+    }
+
+    tick()
+    const timer = setInterval(tick, 250)
+    return () => clearInterval(timer)
+  }, [activeCallId, activeCallStatus, currentCall, endFirestoreCall])
+
+  useEffect(() => {
     if (currentCall?.status === 'active') {
       queueMicrotask(() => joinAgora(currentCall))
     } else if (!currentCall) {
@@ -463,7 +567,7 @@ export default function CallManager({ user, request }) {
     if (!localVideoRef.current || !videoTrack || !localVideoReady || !localCameraOn) return undefined
     videoTrack.play(localVideoRef.current)
     return () => videoTrack.stop()
-  }, [localVideoReady, localCameraOn, currentCall?.id])
+  }, [featuredSource, previewSource, showPreview, localVideoReady, localCameraOn, currentCall?.id])
 
   useEffect(() => {
     const handlePageHide = () => {
@@ -501,7 +605,7 @@ export default function CallManager({ user, request }) {
         acceptedBy: user.uid,
         acceptedAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
-      }, 'accepted')
+      }, 'accepted', { expectedStatus: 'ringing' })
     } catch (err) {
       console.error('Accept call failed:', err)
       setCallError('Could not accept the call.')
@@ -516,6 +620,7 @@ export default function CallManager({ user, request }) {
     try {
       await audioTrack.setEnabled(nextMicState)
       setLocalMicOn(nextMicState)
+      updateLocalCallControls({ micMuted: !nextMicState })
       setMediaNotice('')
     } catch (err) {
       console.warn('Microphone toggle failed:', err)
@@ -584,9 +689,85 @@ export default function CallManager({ user, request }) {
     }
   }
 
-  const toggleRemoteAudio = () => {
-    setRemoteAudioOn(prev => !prev)
+  const toggleSpeaker = () => {
+    setSpeakerOn(prev => !prev)
     setMediaNotice('')
+  }
+
+  const toggleRemoteSilencer = () => {
+    setRemoteSilenced(prev => {
+      const next = !prev
+      remoteSilencedRef.current = next
+      updateLocalCallControls({ silencerOn: next })
+      return next
+    })
+    setMediaNotice('')
+  }
+
+  const swapFeaturedVideo = () => {
+    if (previewMovedRef.current) {
+      previewMovedRef.current = false
+      return
+    }
+    if (!showPreview || !['local', 'remote'].includes(previewSource)) return
+    setFeaturedVideo(previewSource)
+  }
+
+  const snapPreviewToCorner = (clientX, clientY) => {
+    const stage = callStageRef.current
+    if (!stage) return previewCorner
+    const rect = stage.getBoundingClientRect()
+    const horizontal = clientX - rect.left < rect.width / 2 ? 'left' : 'right'
+    const vertical = clientY - rect.top < rect.height / 2 ? 'top' : 'bottom'
+    const nextCorner = `${vertical}-${horizontal}`
+    return videoCorners.includes(nextCorner) ? nextCorner : previewCorner
+  }
+
+  const handlePreviewPointerDown = e => {
+    if (!showPreview) return
+    const preview = previewRef.current
+    const stage = callStageRef.current
+    if (!preview || !stage) return
+    e.preventDefault()
+    preview.setPointerCapture?.(e.pointerId)
+    previewMovedRef.current = false
+    const previewRect = preview.getBoundingClientRect()
+    const stageRect = stage.getBoundingClientRect()
+    setPreviewDrag({
+      pointerId: e.pointerId,
+      offsetX: e.clientX - previewRect.left,
+      offsetY: e.clientY - previewRect.top,
+      left: previewRect.left - stageRect.left,
+      top: previewRect.top - stageRect.top,
+    })
+  }
+
+  const handlePreviewPointerMove = e => {
+    if (!previewDrag || e.pointerId !== previewDrag.pointerId) return
+    const stage = callStageRef.current
+    const preview = previewRef.current
+    if (!stage || !preview) return
+    const stageRect = stage.getBoundingClientRect()
+    const previewRect = preview.getBoundingClientRect()
+    const nextLeft = Math.min(
+      Math.max(e.clientX - stageRect.left - previewDrag.offsetX, 12),
+      Math.max(12, stageRect.width - previewRect.width - 12)
+    )
+    const nextTop = Math.min(
+      Math.max(e.clientY - stageRect.top - previewDrag.offsetY, 12),
+      Math.max(12, stageRect.height - previewRect.height - 12)
+    )
+    if (Math.abs(nextLeft - previewDrag.left) > 4 || Math.abs(nextTop - previewDrag.top) > 4) {
+      previewMovedRef.current = true
+    }
+    setPreviewDrag(prev => prev ? { ...prev, left: nextLeft, top: nextTop } : prev)
+  }
+
+  const handlePreviewPointerEnd = e => {
+    if (!previewDrag || e.pointerId !== previewDrag.pointerId) return
+    previewRef.current?.releasePointerCapture?.(e.pointerId)
+    setPreviewCorner(snapPreviewToCorner(e.clientX, e.clientY))
+    setPreviewDrag(null)
   }
 
   const closeOrEndCall = () => {
@@ -602,6 +783,7 @@ export default function CallManager({ user, request }) {
     const secs = (seconds % 60).toString().padStart(2, '0')
     return `${mins}:${secs}`
   }
+  const formatRemaining = ms => formatElapsed(Math.ceil(ms / 1000))
 
   if (!currentCall && !callError) return null
 
@@ -609,20 +791,46 @@ export default function CallManager({ user, request }) {
     <div className={`call-shell ${isActive ? 'active' : 'ringing'}`}>
       <div className={`call-panel ${showVideoStage ? 'call-panel-video' : ''}`}>
         {showVideoStage ? (
-          <div className="call-stage">
-            {remoteUsers.length ? (
-              remoteUsers.map(remoteUser => <RemoteVideo key={remoteUser.uid} user={remoteUser} />)
+          <div className="call-stage" ref={callStageRef}>
+            {featuredSource === 'remote' && remoteVideoUser ? (
+              <RemoteVideo user={remoteVideoUser} />
+            ) : featuredSource === 'local' ? (
+              <div className="call-video call-video-local-featured">
+                <div className="call-video-feed" ref={localVideoRef} />
+                {!localCameraOn && <span>Camera off</span>}
+                {localCameraOn && !localVideoReady && <span>Camera starting</span>}
+              </div>
             ) : (
               <div className="call-video call-video-waiting">
                 <div className="call-avatar">{otherName[0]?.toUpperCase() || '?'}</div>
                 <span>{isVideoCall ? 'Waiting for video' : 'Camera is on'}</span>
               </div>
             )}
-            <div className={`call-video-local ${localCameraOn ? '' : 'camera-off'}`}>
-              <div className="call-video-feed" ref={localVideoRef} />
-              {!localCameraOn && <span>Camera off</span>}
-              {localCameraOn && !localVideoReady && <span>Camera starting</span>}
-            </div>
+
+            {showPreview && (
+              <button
+                type="button"
+                ref={previewRef}
+                className={`call-video-preview call-video-preview-${previewCorner} ${previewDrag ? 'dragging' : ''} ${previewSource === 'local' && !localCameraOn ? 'camera-off' : ''}`}
+                style={previewDrag ? { left: previewDrag.left, top: previewDrag.top } : undefined}
+                onClick={swapFeaturedVideo}
+                onPointerDown={handlePreviewPointerDown}
+                onPointerMove={handlePreviewPointerMove}
+                onPointerUp={handlePreviewPointerEnd}
+                onPointerCancel={handlePreviewPointerEnd}
+                title="Switch camera view"
+              >
+                {previewSource === 'remote' && remoteVideoUser ? (
+                  <RemoteVideo user={remoteVideoUser} className="call-video-preview-feed" />
+                ) : (
+                  <>
+                    <div className="call-video-feed" ref={localVideoRef} />
+                    {!localCameraOn && <span>Camera off</span>}
+                    {localCameraOn && !localVideoReady && <span>Camera starting</span>}
+                  </>
+                )}
+              </button>
+            )}
           </div>
         ) : (
           <div className="call-portrait">
@@ -641,12 +849,32 @@ export default function CallManager({ user, request }) {
               mediaNotice || (isActive
                 ? `${currentCall.type === 'video' ? 'Video' : 'Voice'} call ${formatElapsed(elapsed)}`
                 : isIncomingRinging
-                  ? `Incoming ${currentCall.type} call`
+                  ? `Incoming ${currentCall.type} call ${formatRemaining(ringTimeLeft)}`
                   : isOutgoingRinging
-                    ? `Calling ${otherName}...`
+                    ? `Calling ${otherName}... ${formatRemaining(ringTimeLeft)}`
                     : 'Connecting...')
             )}
           </div>
+          {isActive && (otherMicMuted || otherSilencerOn) && (
+            <div className="call-state-badges">
+              {otherMicMuted && (
+                <span className="call-state-badge">
+                  <svg viewBox="0 0 24 24" fill="currentColor" width="13" height="13" aria-hidden="true">
+                    <path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05L19 15.18V11zM4.27 3 3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.42 2.72 6.23 6 6.72V21h2v-3.28c.99-.15 1.9-.53 2.68-1.07L19.73 21 21 19.73 4.27 3zM15 10.17V5c0-1.66-1.34-3-3-3-1.36 0-2.5.91-2.87 2.15L15 10.17z" />
+                  </svg>
+                  Muted
+                </span>
+              )}
+              {otherSilencerOn && (
+                <span className="call-state-badge">
+                  <svg viewBox="0 0 24 24" fill="currentColor" width="13" height="13" aria-hidden="true">
+                    <path d="M4.27 3 3 4.27 19.73 21 21 19.73 4.27 3zM3 9v6h4l5 5v-6.73L7.73 9H3zm9-5-2.1 2.1L12 8.2V4zm5.5 8c0-1.77-1-3.29-2.5-4.03v2.2l2.45 2.45c.03-.2.05-.41.05-.62z" />
+                  </svg>
+                  Silencer
+                </span>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="call-actions">
@@ -683,17 +911,32 @@ export default function CallManager({ user, request }) {
                 )}
               </button>
               <button
-                className={`call-action call-secondary ${remoteAudioOn ? '' : 'is-off'}`}
-                onClick={toggleRemoteAudio}
-                title={remoteAudioOn ? 'Silence call audio' : 'Unsilence call audio'}
+                className={`call-action call-secondary ${speakerOn ? 'is-off' : ''}`}
+                onClick={toggleSpeaker}
+                title={speakerOn ? 'Turn speaker off' : 'Turn speaker on'}
               >
-                {remoteAudioOn ? (
+                {speakerOn ? (
                   <svg viewBox="0 0 24 24" fill="currentColor" width="24" height="24">
                     <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.26 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" />
                   </svg>
                 ) : (
                   <svg viewBox="0 0 24 24" fill="currentColor" width="24" height="24">
-                    <path d="M16.5 12c0-1.77-1-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zM19 12c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.62 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73L16.25 17.52c-.67.52-1.43.93-2.25 1.19v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73 4.27 3zM12 4L9.91 6.09 12 8.18V4z" />
+                    <path d="M3 9v6h4l5 5V4L7 9H3zm12.5 3c0-1.77-1-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.26 2.5-4.02z" />
+                  </svg>
+                )}
+              </button>
+              <button
+                className={`call-action call-secondary ${remoteSilenced ? 'is-off' : ''}`}
+                onClick={toggleRemoteSilencer}
+                title={remoteSilenced ? 'Unsilence call audio' : 'Silence call audio'}
+              >
+                {remoteSilenced ? (
+                  <svg viewBox="0 0 24 24" fill="currentColor" width="24" height="24">
+                    <path d="M4.27 3 3 4.27 7.73 9H3v6h4l5 5v-6.73L16.25 17.52c-.67.52-1.43.93-2.25 1.19v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73 4.27 3zM19 12c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.62 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM12 4 9.91 6.09 12 8.18V4z" />
+                  </svg>
+                ) : (
+                  <svg viewBox="0 0 24 24" fill="currentColor" width="24" height="24">
+                    <path d="M4.27 3 3 4.27 19.73 21 21 19.73 4.27 3zM3 9v6h4l5 5v-6.73L7.73 9H3zm9-5-2.1 2.1L12 8.2V4zm5.5 8c0-1.77-1-3.29-2.5-4.03v2.2l2.45 2.45c.03-.2.05-.41.05-.62z" />
                   </svg>
                 )}
               </button>

@@ -10,16 +10,22 @@ import {
   collection, query, where, serverTimestamp,
 } from 'firebase/firestore'
 import { auth, secondaryAuth, db, secondaryDb } from '../firebase'
-import { sendEmailCode, getErrorMessage } from '../email'
+import { sendAccountEmail, sendEmailCode, getErrorMessage } from '../email'
 import { GtyLogo } from '../App'
 import { useAppContext } from '../context/AppContext'
 import { buildBirthday } from '../profile'
+import PasswordInput from './PasswordInput'
 
 // ── helpers ──────────────────────────────────────────────────
 const genCode  = () => String(Math.floor(10000 + Math.random() * 90000))
 const genPhone = () => String(Math.floor(1000000000 + Math.random() * 9000000000))
 const codeKey  = email => email.replace(/\./g, ',').replace(/@/g, '--at--')
 const isSignupPhone = value => /^\d{10}$/.test(value.trim())
+
+const sendAccountEmailQuietly = (...args) =>
+  args[0]
+    ? sendAccountEmail(...args).catch(err => console.warn('Account email failed:', err))
+    : Promise.resolve()
 
 const storeCode = (key, code, ms, meta = {}) =>
   setDoc(doc(db, 'verificationCodes', key), {
@@ -231,7 +237,13 @@ function LoginForm({ onForgot, tr }) {
       </div>
       <div className="field">
         <label>{tr.password}</label>
-        <input type="password" value={pass} onChange={e => setPass(e.target.value)} required />
+        <PasswordInput
+          value={pass}
+          onChange={e => setPass(e.target.value)}
+          showLabel={tr.showPassword}
+          hideLabel={tr.hidePassword}
+          required
+        />
       </div>
       {error && <div className="error-banner">{error}</div>}
       <button type="submit" className="btn-primary" disabled={loading}>
@@ -325,7 +337,7 @@ function RegisterFlow({ tr }) {
         lastName: lastName.trim(),
         birthday: buildBirthday(birthDay, birthMonth, birthYear),
       })
-      await sendEmailCode(email.trim(), code, 2)
+      await sendEmailCode(email.trim(), code, 2, pendingLang)
       setLang(pendingLang)
       setStep(4)
     } catch (e) {
@@ -365,6 +377,10 @@ function RegisterFlow({ tr }) {
       })
       await signOut(secondaryAuth)
       await deleteDoc(doc(db, 'verificationCodes', key))
+      await sendAccountEmailQuietly(email.trim(), 'registered', l, {
+        phoneNumber,
+        newEmail: email.trim(),
+      })
       await signInWithEmailAndPassword(auth, `${phoneNumber}@chatapp.local`, pw)
     } catch (e) {
       if (e.code === 'auth/email-already-in-use') return { error: tr.numberTaken }
@@ -392,7 +408,7 @@ function RegisterFlow({ tr }) {
       lastName: lastName.trim(),
       birthday,
     })
-    await sendEmailCode(email.trim(), code, 2)
+    await sendEmailCode(email.trim(), code, 2, pendingLang)
   }
 
   if (step === 1) return (
@@ -431,8 +447,14 @@ function RegisterFlow({ tr }) {
       </div>
       <div className="field">
         <label>{tr.choosePassword}</label>
-        <input type="password" value={pass} onChange={e => setPass(e.target.value)}
-          placeholder={tr.minPasswordPlaceholder} required />
+        <PasswordInput
+          value={pass}
+          onChange={e => setPass(e.target.value)}
+          placeholder={tr.minPasswordPlaceholder}
+          showLabel={tr.showPassword}
+          hideLabel={tr.hidePassword}
+          required
+        />
       </div>
       <div className="field">
         <label>{tr.selectLanguage}</label>
@@ -550,7 +572,7 @@ function ForgotFlow({ tr, onBack }) {
       }
       const code = genCode()
       await storeCode(codeKey(email), code, 60_000, { uid: userRow.id, phoneNumber: userRow.phoneNumber, email })
-      await sendEmailCode(email, code, 1)
+      await sendEmailCode(email, code, 1, userRow.language || 'en')
       setFoundUser(userRow); setFoundEmail(email); setStep(2)
     } catch (e) { setError(getErrorMessage(e)) }
     finally { setLoading(false) }
@@ -565,7 +587,7 @@ function ForgotFlow({ tr, onBack }) {
   const resend = async () => {
     const code = genCode()
     await storeCode(codeKey(foundEmail), code, 60_000, { uid: foundUser.id, phoneNumber: foundUser.phoneNumber, email: foundEmail })
-    await sendEmailCode(foundEmail, code, 1)
+    await sendEmailCode(foundEmail, code, 1, foundUser.language || 'en')
   }
 
   const setPassword = async e => {
@@ -583,6 +605,9 @@ function ForgotFlow({ tr, onBack }) {
       const { updateDoc } = await import('firebase/firestore')
       await updateDoc(doc(db, 'users', foundUser.id), { adminPassword: newPass })
       await deleteDoc(doc(db, 'verificationCodes', codeKey(foundEmail)))
+      await sendAccountEmailQuietly(foundEmail, 'passwordReset', foundUser.language || 'en', {
+        phoneNumber: foundUser.phoneNumber,
+      })
       setSuccess(true)
     } catch (e) { setError(getErrorMessage(e)) }
     finally { setLoading(false) }
@@ -628,11 +653,24 @@ function ForgotFlow({ tr, onBack }) {
       </p>
       <div className="field">
         <label>{tr.newPassword}</label>
-        <input type="password" value={newPass} onChange={e => setNewPass(e.target.value)} required autoFocus />
+        <PasswordInput
+          value={newPass}
+          onChange={e => setNewPass(e.target.value)}
+          showLabel={tr.showPassword}
+          hideLabel={tr.hidePassword}
+          required
+          autoFocus
+        />
       </div>
       <div className="field">
         <label>{tr.confirmNewPassword}</label>
-        <input type="password" value={confirmPass} onChange={e => setConfirmPass(e.target.value)} required />
+        <PasswordInput
+          value={confirmPass}
+          onChange={e => setConfirmPass(e.target.value)}
+          showLabel={tr.showPassword}
+          hideLabel={tr.hidePassword}
+          required
+        />
       </div>
       {error && <div className="error-banner">{error}</div>}
       <button type="submit" className="btn-primary" disabled={loading}>

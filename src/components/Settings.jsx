@@ -6,9 +6,10 @@ import {
 } from 'firebase/auth'
 import { collection, doc, getDoc, getDocs, updateDoc, setDoc, deleteDoc, query, where } from 'firebase/firestore'
 import { auth, db } from '../firebase'
-import { sendEmailCode, getErrorMessage } from '../email'
+import { sendAccountEmail, sendEmailCode, getErrorMessage } from '../email'
 import { useAppContext } from '../context/AppContext'
 import { buildBirthday, buildDisplayName, formatBirthday, parseBirthday } from '../profile'
+import PasswordInput from './PasswordInput'
 
 const genCode = () => String(Math.floor(10000 + Math.random() * 90000))
 const codeKey = email => email.replace(/\./g, ',').replace(/@/g, '--at--') + '_s'
@@ -16,6 +17,10 @@ const passwordCodeKey = email => `${codeKey(email)}_pw`
 const changeEmailCodeKey = email => `${codeKey(email)}_change_email`
 const PASSWORD_MASK = '********'
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const sendAccountEmailQuietly = (...args) =>
+  args[0]
+    ? sendAccountEmail(...args).catch(err => console.warn('Account email failed:', err))
+    : Promise.resolve()
 
 function useCountdown(init) {
   const [left, setLeft] = useState(init)
@@ -248,6 +253,7 @@ function InformationSettings({ user, profile, tr, mode, onModeChange, onUpdated 
       {mode === 'password' && (
         <ChangePassword
           user={user}
+          profile={profile}
           tr={tr}
           onBack={() => onModeChange(null)}
           onUpdated={onUpdated}
@@ -325,7 +331,7 @@ function ShowPasswordFlow({ profile, tr, onBack, onReveal }) {
         email,
         purpose: 'show-password',
       })
-      await sendEmailCode(email, nextCode, 1)
+      await sendEmailCode(email, nextCode, 1, profile?.language || 'en')
       reset(60)
       setStep(2)
     } catch (e) {
@@ -572,7 +578,7 @@ function EditBirthdayField({ user, profile, tr, onBack, onUpdated }) {
   )
 }
 
-function ChangePassword({ user, tr, onBack, onUpdated }) {
+function ChangePassword({ user, profile, tr, onBack, onUpdated }) {
   const [step, setStep] = useState(1)
   const [code, setCode] = useState('')
   const [newPass, setNewPass] = useState('')
@@ -582,9 +588,11 @@ function ChangePassword({ user, tr, onBack, onUpdated }) {
   const [done, setDone] = useState(false)
   const { left, reset, fmt } = useCountdown(60)
 
+  const getUserProfile = async () => profile || await getProfile(user.uid)
+
   const getUserEmail = async () => {
-    const profile = await getProfile(user.uid)
-    return profile?.contactEmail || null
+    const userProfile = await getUserProfile()
+    return userProfile?.contactEmail || null
   }
 
   const sendCode = async () => {
@@ -593,6 +601,7 @@ function ChangePassword({ user, tr, onBack, onUpdated }) {
     try {
       const email = await getUserEmail()
       if (!email) throw new Error(tr.noEmailOnFile)
+      const userProfile = await getUserProfile()
       const nextCode = genCode()
       await setDoc(doc(db, 'verificationCodes', codeKey(email)), {
         code: nextCode,
@@ -600,7 +609,7 @@ function ChangePassword({ user, tr, onBack, onUpdated }) {
         uid: user.uid,
         email,
       })
-      await sendEmailCode(email, nextCode, 1)
+      await sendEmailCode(email, nextCode, 1, userProfile?.language || 'en')
       reset(60)
       setStep(2)
     } catch (e) {
@@ -640,6 +649,9 @@ function ChangePassword({ user, tr, onBack, onUpdated }) {
       await updatePassword(auth.currentUser, newPass)
       await updateDoc(doc(db, 'users', user.uid), { adminPassword: newPass })
       await deleteDoc(doc(db, 'verificationCodes', codeKey(email)))
+      await sendAccountEmailQuietly(email, 'passwordChanged', userData.language || 'en', {
+        phoneNumber: userData.phoneNumber,
+      })
       await onUpdated()
       setDone(true)
     } catch (e) {
@@ -694,11 +706,23 @@ function ChangePassword({ user, tr, onBack, onUpdated }) {
           )}
           <div className="field">
             <label>{tr.newPassword}</label>
-            <input type="password" value={newPass} onChange={e => setNewPass(e.target.value)} required />
+            <PasswordInput
+              value={newPass}
+              onChange={e => setNewPass(e.target.value)}
+              showLabel={tr.showPassword}
+              hideLabel={tr.hidePassword}
+              required
+            />
           </div>
           <div className="field">
             <label>{tr.confirmNewPassword}</label>
-            <input type="password" value={conf} onChange={e => setConf(e.target.value)} required />
+            <PasswordInput
+              value={conf}
+              onChange={e => setConf(e.target.value)}
+              showLabel={tr.showPassword}
+              hideLabel={tr.hidePassword}
+              required
+            />
           </div>
           {error && <div className="error-banner">{error}</div>}
           <div className="settings-inline-actions">
@@ -740,7 +764,7 @@ function ChangeEmailVerified({ user, profile, tr, onBack, onUpdated }) {
         email: currentEmail,
         purpose: 'change-email-identity',
       })
-      await sendEmailCode(currentEmail, nextCode, 1)
+      await sendEmailCode(currentEmail, nextCode, 1, profile?.language || 'en')
       reset(60)
       setStep(2)
     } catch (e) {
@@ -799,6 +823,18 @@ function ChangeEmailVerified({ user, profile, tr, onBack, onUpdated }) {
       const belongsToAnotherUser = existing.docs.some(userDoc => userDoc.id !== user.uid)
       if (belongsToAnotherUser) throw new Error(tr.emailInUse)
       await updateDoc(doc(db, 'users', user.uid), { contactEmail: trimmedNewEmail })
+      await Promise.all([
+        sendAccountEmailQuietly(currentEmail, 'emailChangedOld', profile?.language || 'en', {
+          phoneNumber: profile?.phoneNumber || user.uid,
+          oldEmail: currentEmail,
+          newEmail: trimmedNewEmail,
+        }),
+        sendAccountEmailQuietly(trimmedNewEmail, 'emailChangedNew', profile?.language || 'en', {
+          phoneNumber: profile?.phoneNumber || user.uid,
+          oldEmail: currentEmail,
+          newEmail: trimmedNewEmail,
+        }),
+      ])
       await onUpdated()
       setDone(true)
     } catch (e) {
