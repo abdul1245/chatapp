@@ -26,6 +26,7 @@ import { useAppContext } from '../context/AppContext'
 import { buildBirthday, buildDisplayName, formatBirthday, parseBirthday } from '../profile'
 import PasswordInput from './PasswordInput'
 import { sendAccountEmail } from '../email'
+import { t as translations } from '../i18n'
 import {
   archiveAndDeleteUserAccount,
   loadDeletedUserDeviceLists,
@@ -58,7 +59,7 @@ const emptyNewUser = {
   birthMonth: '',
   birthYear: '',
 }
-const isAdminPhone = value => /^\d+$/.test(value.trim())
+const isAdminPhone = value => /^\d{10,11}$/.test(value.trim())
 const deletedLogPackageId = 'lastDeleted'
 const batchLimit = 450
 const sendAccountEmailQuietly = (...args) =>
@@ -103,6 +104,7 @@ export default function Admin() {
   const deviceLoadSeqRef = useRef(0)
   const text = (key, values = {}) =>
     Object.entries(values).reduce((out, [name, value]) => out.replace(`{${name}}`, value), tr[key] || '')
+  const createUserTr = () => translations[newUserForm.language] || tr
   const logActionLabel = action => ({
     user_created: tr.userCreated,
     device_forced_logout: tr.deviceLoggedOut,
@@ -219,7 +221,7 @@ export default function Admin() {
     const birthday = buildBirthday(newUserForm.birthDay, newUserForm.birthMonth, newUserForm.birthYear)
 
     if (!isAdminPhone(phoneNumber)) {
-      showFeedback(tr.phoneDigitsOnly, 'error')
+      showFeedback(createUserTr().phoneMustBe10Digits, 'error')
       return
     }
 

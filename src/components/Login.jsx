@@ -24,7 +24,7 @@ const genCode  = () => String(Math.floor(10000 + Math.random() * 90000))
 const genPhone = () => String(Math.floor(1000000000 + Math.random() * 9000000000))
 const codeKey  = email => email.replace(/\./g, ',').replace(/@/g, '--at--')
 const activeSessionCodeKey = uid => `${uid}_active_session_login`
-const isSignupPhone = value => /^\d{10}$/.test(value.trim())
+const isSignupPhone = value => /^\d{10,11}$/.test(value.trim())
 const deletedAccountErrorCode = 'account/deleted'
 
 const sendAccountEmailQuietly = (...args) =>
