@@ -45,6 +45,9 @@ const emailText = {
     emailChangedNewSubject: 'This email is now connected to GtyChat',
     emailChangedNewMessage: ({ phoneNumber, newEmail }) =>
       `GtyChat phone number ${phoneNumber} changed its email address to ${newEmail}.`,
+    accountDeletedSubject: 'Your GtyChat account was deleted',
+    accountDeletedMessage: ({ phoneNumber, deletedAt }) =>
+      `The GtyChat account with phone number ${phoneNumber} was deleted on ${deletedAt}.`,
     activeSessionLoginAttemptSubject: 'Login attempt while your GtyChat account was active',
     activeSessionLoginAttemptMessage: ({ phoneNumber, attemptTime, attemptDevice, attemptCountry, attemptTimezone, activeDevice, status }) =>
       `A login attempt was made for GtyChat phone number ${phoneNumber} while another session was already active. Attempt time: ${attemptTime}. New device: ${attemptDevice || 'Unknown device'}. Location/timezone: ${attemptCountry || 'Unknown'} / ${attemptTimezone || 'Unknown'}. Active device: ${activeDevice || 'Unknown device'}. Status: ${status}.`,
@@ -69,6 +72,9 @@ const emailText = {
     emailChangedNewSubject: 'Diese E-Mail ist jetzt mit GtyChat verbunden',
     emailChangedNewMessage: ({ phoneNumber, newEmail }) =>
       `Die GtyChat-Telefonnummer ${phoneNumber} hat ihre E-Mail-Adresse zu ${newEmail} geaendert.`,
+    accountDeletedSubject: 'Dein GtyChat-Konto wurde geloescht',
+    accountDeletedMessage: ({ phoneNumber, deletedAt }) =>
+      `Das GtyChat-Konto mit der Telefonnummer ${phoneNumber} wurde am ${deletedAt} geloescht.`,
     activeSessionLoginAttemptSubject: 'Anmeldeversuch, waehrend dein GtyChat-Konto aktiv war',
     activeSessionLoginAttemptMessage: ({ phoneNumber, attemptTime, attemptDevice, attemptCountry, attemptTimezone, activeDevice, status }) =>
       `Es gab einen Anmeldeversuch fuer die GtyChat-Telefonnummer ${phoneNumber}, waehrend bereits eine andere Sitzung aktiv war. Zeit: ${attemptTime}. Neues Geraet: ${attemptDevice || 'Unbekanntes Geraet'}. Standort/Zeitzone: ${attemptCountry || 'Unbekannt'} / ${attemptTimezone || 'Unbekannt'}. Aktives Geraet: ${activeDevice || 'Unbekanntes Geraet'}. Status: ${status}.`,
@@ -93,6 +99,9 @@ const emailText = {
     emailChangedNewSubject: 'Cette adresse e-mail est maintenant liee a GtyChat',
     emailChangedNewMessage: ({ phoneNumber, newEmail }) =>
       `Le numero GtyChat ${phoneNumber} a change son adresse e-mail en ${newEmail}.`,
+    accountDeletedSubject: 'Votre compte GtyChat a ete supprime',
+    accountDeletedMessage: ({ phoneNumber, deletedAt }) =>
+      `Le compte GtyChat associe au numero ${phoneNumber} a ete supprime le ${deletedAt}.`,
     activeSessionLoginAttemptSubject: 'Tentative de connexion pendant une session GtyChat active',
     activeSessionLoginAttemptMessage: ({ phoneNumber, attemptTime, attemptDevice, attemptCountry, attemptTimezone, activeDevice, status }) =>
       `Une tentative de connexion a ete effectuee pour le numero GtyChat ${phoneNumber} alors qu'une autre session etait deja active. Heure: ${attemptTime}. Nouvel appareil: ${attemptDevice || 'Appareil inconnu'}. Pays/fuseau horaire: ${attemptCountry || 'Inconnu'} / ${attemptTimezone || 'Inconnu'}. Appareil actif: ${activeDevice || 'Appareil inconnu'}. Statut: ${status}.`,
@@ -117,6 +126,9 @@ const emailText = {
     emailChangedNewSubject: 'هذا البريد الإلكتروني مرتبط الآن بـ GtyChat',
     emailChangedNewMessage: ({ phoneNumber, newEmail }) =>
       `رقم GtyChat ${phoneNumber} غيّر بريده الإلكتروني إلى ${newEmail}.`,
+    accountDeletedSubject: 'تم حذف حسابك في GtyChat',
+    accountDeletedMessage: ({ phoneNumber, deletedAt }) =>
+      `تم حذف حساب GtyChat المرتبط برقم الهاتف ${phoneNumber} في ${deletedAt}.`,
     activeSessionLoginAttemptSubject: 'محاولة تسجيل دخول أثناء وجود جلسة GtyChat نشطة',
     activeSessionLoginAttemptMessage: ({ phoneNumber, attemptTime, attemptDevice, attemptCountry, attemptTimezone, activeDevice, status }) =>
       `تمت محاولة تسجيل دخول لرقم GtyChat ${phoneNumber} بينما كانت هناك جلسة أخرى نشطة. وقت المحاولة: ${attemptTime}. الجهاز الجديد: ${attemptDevice || 'جهاز غير معروف'}. الموقع/المنطقة الزمنية: ${attemptCountry || 'غير معروف'} / ${attemptTimezone || 'غير معروف'}. الجهاز النشط: ${activeDevice || 'جهاز غير معروف'}. الحالة: ${status}.`,
@@ -263,5 +275,6 @@ export const sendAccountEmail = async (toEmail, type, lang = defaultLang, detail
     attempt_timezone: details.attemptTimezone || '',
     active_device: details.activeDevice || '',
     status: localizedStatus || '',
+    deleted_at: details.deletedAt || '',
   })
 }

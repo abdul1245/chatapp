@@ -7,7 +7,6 @@ import {
 } from 'firebase/auth'
 import {
   collection,
-  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -27,6 +26,14 @@ import { useAppContext } from '../context/AppContext'
 import { buildBirthday, buildDisplayName, formatBirthday, parseBirthday } from '../profile'
 import PasswordInput from './PasswordInput'
 import { sendAccountEmail } from '../email'
+import {
+  archiveAndDeleteUserAccount,
+  loadDeletedUserDeviceLists,
+  loadRecoverableDeletedUsers,
+  permanentlyDeleteDeletedUserAccount,
+  purgeExpiredDeletedUsers,
+  recoverDeletedUserAccount,
+} from '../accountDeletion'
 
 const ADMIN_PASS = import.meta.env.VITE_ADMIN_PASSWORD
 
@@ -64,6 +71,7 @@ export default function Admin() {
   const [authed, setAuthed] = useState(false)
   const [adminInput, setAdminInput] = useState('')
   const [users, setUsers] = useState([])
+  const [deletedUsers, setDeletedUsers] = useState([])
   const [logs, setLogs] = useState([])
   const [deletedLogs, setDeletedLogs] = useState([])
   const [deletedLogsMeta, setDeletedLogsMeta] = useState(null)
@@ -79,6 +87,11 @@ export default function Admin() {
   const [modForm, setModForm] = useState(emptyModeration)
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [devicesTarget, setDevicesTarget] = useState(null)
+  const [deletedDevicesTarget, setDeletedDevicesTarget] = useState(null)
+  const [deletedDevices, setDeletedDevices] = useState([])
+  const [deletedLastDevices, setDeletedLastDevices] = useState([])
+  const [deletedLastDevicesMeta, setDeletedLastDevicesMeta] = useState(null)
+  const [showingDeletedLastDevices, setShowingDeletedLastDevices] = useState(false)
   const [devices, setDevices] = useState([])
   const [deviceHistory, setDeviceHistory] = useState([])
   const [deviceHistoryMeta, setDeviceHistoryMeta] = useState(null)
@@ -99,6 +112,8 @@ export default function Admin() {
     ban_applied: tr.userBanned,
     moderation_lifted: tr.moderationLifted,
     user_deleted: tr.userDeleted,
+    user_recovered: tr.userRecovered,
+    user_permanently_deleted: tr.userPermanentlyDeleted,
   }[action] || action)
 
   const showFeedback = (msg, type = 'success') => {
@@ -140,6 +155,11 @@ export default function Admin() {
     setUsers(snap.docs.map(d => ({ id: d.id, ...d.data() })))
   }
 
+  const loadDeletedUsers = async () => {
+    await purgeExpiredDeletedUsers(secondaryDb, secondaryAuth)
+    setDeletedUsers(await loadRecoverableDeletedUsers(secondaryDb))
+  }
+
   const loadLogs = async () => {
     const snap = await getDocs(query(collection(secondaryDb, 'adminLogs'), orderBy('createdAt', 'desc'), limit(100)))
     setLogs(snap.docs.map(d => ({ id: d.id, ...d.data() })))
@@ -164,6 +184,7 @@ export default function Admin() {
 
   const refresh = async () => {
     await loadUsers()
+    await loadDeletedUsers()
     await loadLogs()
     await loadDeletedLogs()
   }
@@ -291,13 +312,49 @@ export default function Admin() {
     ].some(value => String(value || '').toLowerCase().includes(searchText))
   }
 
+  const deletedUserMatches = user => {
+    if (!searchText) return true
+    const deletedAtMs = user.deletedAtMs || getMillis(user.deletedAt)
+    const deletedAtIso = deletedAtMs ? new Date(deletedAtMs).toISOString() : ''
+    return [
+      buildDisplayName(user),
+      user.name,
+      user.lastName,
+      user.birthday,
+      user.phoneNumber,
+      user.contactEmail,
+      user.id,
+      user.deletedBy,
+      fmtDate(user.deletedAt),
+      deletedAtIso,
+      user.deletedAtText,
+    ].some(value => String(value || '').toLowerCase().includes(searchText))
+  }
+
   const moderatedUsers = users.filter(u => getStatus(u) !== 'active')
   const visibleUsers = (activeTab === 'moderation' ? moderatedUsers : users).filter(userMatches)
+  const visibleDeletedUsers = deletedUsers.filter(deletedUserMatches)
   const visibleLogs = logs.filter(logMatches)
   const visibleDeletedLogs = deletedLogs.filter(logMatches)
   const activeLogs = showingDeletedLogs ? visibleDeletedLogs : visibleLogs
   const activeDeviceRows = showingDeviceHistory ? deviceHistory : devices
+  const activeDeletedDeviceRows = showingDeletedLastDevices ? deletedLastDevices : deletedDevices
   const visibleDeviceRows = activeDeviceRows.filter(device => {
+    const needle = deviceSearch.trim().toLowerCase()
+    if (!needle) return true
+    return [
+      device.deviceLabel,
+      device.country,
+      device.timezone,
+      device.platform,
+      device.userAgent,
+      device.id,
+      fmtDate(device.loggedInAt),
+      fmtDate(device.loggedOutAt),
+      device.active ? 'active' : 'logged out',
+    ].some(value => String(value || '').toLowerCase().includes(needle))
+  })
+  const visibleDeletedDeviceRows = activeDeletedDeviceRows.filter(device => {
     const needle = deviceSearch.trim().toLowerCase()
     if (!needle) return true
     return [
@@ -432,6 +489,38 @@ export default function Admin() {
     setDevicesLoading(false)
     setDeviceLoadError('')
     clearLoadedDevices()
+  }
+
+  const openDeletedDevices = async user => {
+    setDeletedDevicesTarget(user)
+    setDeviceSearch('')
+    setDeviceLoadError('')
+    setDevicesLoading(true)
+    setShowingDeletedLastDevices(false)
+    setDeletedDevices([])
+    setDeletedLastDevices([])
+    setDeletedLastDevicesMeta(null)
+    try {
+      const result = await loadDeletedUserDeviceLists(secondaryDb, user.id)
+      setDeletedDevices(result.devices.sort((a, b) => getMillis(b.loggedInAt) - getMillis(a.loggedInAt)))
+      setDeletedLastDevices(result.lastDevices.sort((a, b) => getMillis(b.loggedInAt) - getMillis(a.loggedInAt)))
+      setDeletedLastDevicesMeta(result.lastDevicesMeta)
+    } catch (err) {
+      const message = `${tr.failedLoadAdminData}: ${err.message}`
+      setDeviceLoadError(message)
+      showFeedback(message, 'error')
+    } finally {
+      setDevicesLoading(false)
+    }
+  }
+
+  const closeDeletedDevices = () => {
+    setDeletedDevicesTarget(null)
+    setDeletedDevices([])
+    setDeletedLastDevices([])
+    setDeletedLastDevicesMeta(null)
+    setDeviceLoadError('')
+    setDevicesLoading(false)
   }
 
   const forceLogoutDevice = async device => {
@@ -668,6 +757,8 @@ export default function Admin() {
   }
 
   const liftModeration = async user => {
+    const displayName = buildDisplayName(user) || user.phoneNumber || tr.unknown
+    if (!window.confirm(text('confirmLiftModeration', { name: displayName }))) return
     if (!user.adminPassword) {
       showFeedback(tr.cannotLiftModeration, 'error')
       return
@@ -695,41 +786,72 @@ export default function Admin() {
 
   const deleteUserAccount = async () => {
     if (!deleteTarget) return
+    const displayName = buildDisplayName(deleteTarget) || deleteTarget.phoneNumber || tr.unknown
+    if (!window.confirm(text('confirmDeleteAccount', { name: displayName, phone: deleteTarget.phoneNumber || tr.unknown }))) return
     if (!deleteTarget.adminPassword) {
-      showFeedback(tr.cannotDeleteNoPassword, 'error')
+      showFeedback(tr.cannotArchiveNoPassword, 'error')
       return
     }
 
     setBusy(true)
     try {
-      const cred = await signInWithEmailAndPassword(
-        secondaryAuth,
-        deleteTarget.authEmail || `${deleteTarget.phoneNumber}@chatapp.local`,
-        deleteTarget.adminPassword
-      )
-
-      const chatsSnap = await getDocs(
-        query(collection(secondaryDb, 'chats'), where('participants', 'array-contains', deleteTarget.id))
-      )
-
-      for (const chatDoc of chatsSnap.docs) {
-        const msgsSnap = await getDocs(collection(secondaryDb, 'chats', chatDoc.id, 'messages'))
-        const batch = writeBatch(secondaryDb)
-        msgsSnap.docs.forEach(m => batch.delete(m.ref))
-        batch.delete(chatDoc.ref)
-        await batch.commit()
-      }
-
-      await deleteDoc(doc(secondaryDb, 'status', deleteTarget.id)).catch(() => {})
-      await deleteDoc(doc(secondaryDb, 'users', deleteTarget.id))
-      await logAction('user_deleted', deleteTarget, { contactEmail: deleteTarget.contactEmail || '' })
-      await cred.user.delete()
-      await signOut(secondaryAuth)
+      const result = await archiveAndDeleteUserAccount(secondaryDb, deleteTarget.id, {
+        deletedBy: 'admin',
+        missingUserMessage: tr.unknownUser,
+      })
+      await logAction('user_deleted', deleteTarget, {
+        contactEmail: deleteTarget.contactEmail || '',
+        deletedAt: result.deletedAtText,
+      })
+      await sendAccountEmailQuietly(deleteTarget.contactEmail, 'accountDeleted', deleteTarget.language || 'en', {
+        phoneNumber: deleteTarget.phoneNumber || deleteTarget.id,
+        deletedAt: result.deletedAtText,
+      })
       setDeleteTarget(null)
       await refresh()
       showFeedback(tr.userDeleted)
     } catch (err) {
       showFeedback(`${tr.deleteFailed}: ${err.message}`, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const recoverDeletedAccount = async user => {
+    const displayName = buildDisplayName(user) || user.phoneNumber || tr.unknown
+    if (!window.confirm(text('confirmRecoverAccount', { name: displayName, phone: user.phoneNumber || tr.unknown }))) return
+    setBusy(true)
+    try {
+      await recoverDeletedUserAccount(secondaryDb, user, {
+        phoneTakenMessage: tr.deletedUserPhoneInUse,
+      })
+      await logAction('user_recovered', user, {
+        contactEmail: user.contactEmail || '',
+        deletedAt: user.deletedAtText || fmtDate(user.deletedAt),
+      })
+      await refresh()
+      showFeedback(tr.userRecovered)
+    } catch (err) {
+      showFeedback(`${tr.recoverUserFailed}: ${err.message || err.code || tr.unknownError}`, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const permanentlyDeleteDeletedAccount = async user => {
+    const displayName = buildDisplayName(user) || user.phoneNumber || tr.unknown
+    if (!window.confirm(text('confirmPermanentDeleteAccount', { name: displayName, phone: user.phoneNumber || tr.unknown }))) return
+    setBusy(true)
+    try {
+      await permanentlyDeleteDeletedUserAccount(secondaryDb, secondaryAuth, user)
+      await logAction('user_permanently_deleted', user, {
+        contactEmail: user.contactEmail || '',
+        deletedAt: user.deletedAtText || fmtDate(user.deletedAt),
+      })
+      await refresh()
+      showFeedback(tr.userPermanentlyDeleted)
+    } catch (err) {
+      showFeedback(`${tr.permanentDeleteFailed}: ${err.message || err.code || tr.unknownError}`, 'error')
     } finally {
       setBusy(false)
     }
@@ -761,13 +883,19 @@ export default function Admin() {
       <div className="admin-topbar">
         <div className="admin-brand"><GtyLogo size={28} /> {tr.adminBrand}</div>
         <div className="admin-tabs">
-          {['users', 'moderation', 'logs'].map(tab => (
+          {['users', 'moderation', 'deletedUsers', 'logs'].map(tab => (
             <button
               key={tab}
               className={`admin-tab ${activeTab === tab ? 'active' : ''}`}
               onClick={() => { setActiveTab(tab); if (tab !== 'logs') setShowingDeletedLogs(false) }}
             >
-              {tab === 'users' ? `${tr.users} (${users.length})` : tab === 'moderation' ? `${tr.moderation} (${moderatedUsers.length})` : `${tr.logs} (${logs.length})`}
+              {tab === 'users'
+                ? `${tr.users} (${users.length})`
+                : tab === 'moderation'
+                  ? `${tr.moderation} (${moderatedUsers.length})`
+                  : tab === 'deletedUsers'
+                    ? `${tr.deletedUsers} (${deletedUsers.length})`
+                    : `${tr.logs} (${logs.length})`}
             </button>
           ))}
         </div>
@@ -779,7 +907,13 @@ export default function Admin() {
           <input
             value={search}
             onChange={e => setSearch(e.target.value)}
-            placeholder={activeTab === 'logs' ? tr.searchLogsPlaceholder : tr.searchUsersPlaceholder}
+            placeholder={
+              activeTab === 'logs'
+                ? tr.searchLogsPlaceholder
+                : activeTab === 'deletedUsers'
+                  ? tr.searchDeletedUsersPlaceholder
+                  : tr.searchUsersPlaceholder
+            }
           />
         </div>
         {feedback.msg && (
@@ -871,7 +1005,7 @@ export default function Admin() {
           </section>
         )}
 
-        {activeTab !== 'logs' ? (
+        {(activeTab === 'users' || activeTab === 'moderation') ? (
           <section className="admin-section">
             <div className="admin-section-title">
               {activeTab === 'users' ? tr.users : tr.moderatedUsers}
@@ -899,6 +1033,43 @@ export default function Admin() {
                     <button className="action-btn danger" onClick={() => openModeration(user, 'ban')}>{tr.ban}</button>
                     {status !== 'active' && <button className="action-btn" onClick={() => liftModeration(user)} disabled={busy}>{tr.lift}</button>}
                     <button className="action-btn danger" onClick={() => setDeleteTarget(user)}>{tr.delete}</button>
+                  </div>
+                </div>
+              )
+            })}
+          </section>
+        ) : activeTab === 'deletedUsers' ? (
+          <section className="admin-section">
+            <div className="admin-section-header">
+              <div>
+                <div className="admin-section-title">{tr.deletedUsers}</div>
+                <div className="user-card-meta">{tr.deletedUsersRetentionNotice}</div>
+              </div>
+            </div>
+            {visibleDeletedUsers.length === 0 ? (
+              <div className="sidebar-empty">{tr.noDeletedUsersFound}</div>
+            ) : visibleDeletedUsers.map(user => {
+              const displayName = buildDisplayName(user) || user.phoneNumber || tr.unknown
+              return (
+                <div className="user-card" key={user.id}>
+                  <div className="avatar"><span>{displayName[0] || '?'}</span></div>
+                  <div className="user-card-info">
+                    <div className="user-card-phone">{displayName}</div>
+                    <div className="user-card-meta">{tr.phoneLabel}: {user.phoneNumber || tr.unknown}</div>
+                    <div className="user-card-meta">{tr.emailAddress}: {user.contactEmail || tr.noContactEmail}</div>
+                    <div className="user-card-meta">{text('deletedAtLine', { date: user.deletedAtText || fmtDate(user.deletedAt) })}</div>
+                    <div className="user-card-meta">{text('deletedDataSummary', {
+                      chats: user.counts?.chats || 0,
+                      messages: user.counts?.messages || 0,
+                      devices: user.counts?.devices || 0,
+                    })}</div>
+                    <div className="user-card-meta">{user.id}</div>
+                  </div>
+                  <span className="user-card-badge badge-banned">{tr.deleted}</span>
+                  <div className="user-card-actions">
+                    <button className="action-btn" onClick={() => openDeletedDevices(user)}>{tr.showDevices}</button>
+                    <button className="action-btn" onClick={() => recoverDeletedAccount(user)} disabled={busy}>{tr.recoverUser}</button>
+                    <button className="action-btn danger" onClick={() => permanentlyDeleteDeletedAccount(user)} disabled={busy}>{tr.deletePermanently}</button>
                   </div>
                 </div>
               )
@@ -1016,6 +1187,62 @@ export default function Admin() {
                       {tr.forceLogout}
                     </button>
                   )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deletedDevicesTarget && (
+        <div className="modal-overlay" onClick={closeDeletedDevices}>
+          <div className="modal admin-devices-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>{text('devicesTitle', { name: buildDisplayName(deletedDevicesTarget) || deletedDevicesTarget.phoneNumber || tr.unknown })}</h2>
+              <button className="icon-btn" onClick={closeDeletedDevices}>x</button>
+            </div>
+
+            <div className="admin-device-toolbar">
+              <input
+                value={deviceSearch}
+                onChange={e => setDeviceSearch(e.target.value)}
+                placeholder={tr.deviceSearchPlaceholder}
+              />
+              <button
+                type="button"
+                className="action-btn"
+                onClick={() => setShowingDeletedLastDevices(value => !value)}
+                disabled={deletedLastDevices.length === 0}
+              >
+                {showingDeletedLastDevices ? tr.currentDevices : tr.lastDevicesHistory}
+              </button>
+            </div>
+
+            {showingDeletedLastDevices && deletedLastDevicesMeta && (
+              <div className="user-card-meta">
+                {text('lastClearedDevices', { date: fmtDate(deletedLastDevicesMeta.clearedAt), count: deletedLastDevicesMeta.count || deletedLastDevices.length })}
+              </div>
+            )}
+
+            <div className="device-list admin-device-list">
+              {devicesLoading ? (
+                <div className="sidebar-empty">{tr.loadingDevices}</div>
+              ) : deviceLoadError ? (
+                <div className="error-banner">{deviceLoadError}</div>
+              ) : visibleDeletedDeviceRows.length === 0 ? (
+                <div className="sidebar-empty">{tr.noDevicesFound}</div>
+              ) : visibleDeletedDeviceRows.map(device => (
+                <div className="device-row" key={device.id}>
+                  <div className="device-row-main">
+                    <div className="device-row-title">
+                      {device.deviceLabel || tr.unknownDevice}
+                      <span className={`device-pill ${device.active ? 'active' : ''}`}>{device.active ? tr.statusActive : tr.deviceStatusLoggedOut}</span>
+                    </div>
+                    <div className="device-row-meta">{device.country || tr.unknownCountry}</div>
+                    <div className="device-row-meta">{text('loggedInOn', { date: fmtDate(device.loggedInAt) })}</div>
+                    <div className="device-row-meta">{device.timezone || '-'}</div>
+                    <div className="device-row-meta">{device.platform || device.id}</div>
+                  </div>
                 </div>
               ))}
             </div>

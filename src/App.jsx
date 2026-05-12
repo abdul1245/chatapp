@@ -64,7 +64,10 @@ export default function App() {
   useEffect(() => {
     if (!user) return
     const unsub = onSnapshot(doc(db, 'users', user.uid), snap => {
-      if (!snap.exists()) return
+      if (!snap.exists()) {
+        signOut(auth)
+        return
+      }
       const data = snap.data()
       if (data.language) setLang(data.language)
       if (data.theme) setTheme(data.theme)

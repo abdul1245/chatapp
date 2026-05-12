@@ -46,6 +46,10 @@ export default function ChatApp({ user, moderation }) {
     await signOut(auth)
   }
 
+  const handleAccountDeleted = async () => {
+    await signOut(auth)
+  }
+
   const handleSelectChat = useCallback(chat => {
     setSelectedChat(chat)
     setMobileChatOpen(Boolean(chat))
@@ -83,7 +87,14 @@ export default function ChatApp({ user, moderation }) {
         )}
       </div>
 
-      {showSettings && <Settings user={user} onClose={() => setShowSettings(false)} onLogout={handleLogout} />}
+      {showSettings && (
+        <Settings
+          user={user}
+          onClose={() => setShowSettings(false)}
+          onLogout={handleLogout}
+          onAccountDeleted={handleAccountDeleted}
+        />
+      )}
       <CallManager user={user} request={callRequest} />
     </div>
   )

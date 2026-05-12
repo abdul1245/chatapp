@@ -13,6 +13,7 @@ import { auth, secondaryAuth, db, secondaryDb } from '../firebase'
 import { sendAccountEmail, sendEmailCode, getErrorMessage, getMissingEmailConfig, isEmailConfigured } from '../email'
 import { GtyLogo } from '../App'
 import { useAppContext } from '../context/AppContext'
+import { t as translations } from '../i18n'
 import { buildBirthday } from '../profile'
 import { maskEmail } from '../privacy'
 import { getDeviceId, getDeviceInfo } from '../deviceSession'
@@ -24,6 +25,7 @@ const genPhone = () => String(Math.floor(1000000000 + Math.random() * 9000000000
 const codeKey  = email => email.replace(/\./g, ',').replace(/@/g, '--at--')
 const activeSessionCodeKey = uid => `${uid}_active_session_login`
 const isSignupPhone = value => /^\d{10}$/.test(value.trim())
+const deletedAccountErrorCode = 'account/deleted'
 
 const sendAccountEmailQuietly = (...args) =>
   args[0]
@@ -43,6 +45,22 @@ const checkCode = async (key, input) => {
   if (Date.now() > exp)     return { ok: false, reason: 'expired' }
   if (d.code !== input.trim()) return { ok: false, reason: 'wrong' }
   return { ok: true, data: d }
+}
+
+const deletedAccountMessage = tr =>
+  tr.accountDeletedLoginMessage || translations.en.accountDeletedLoginMessage
+
+const throwDeletedAccountError = tr => {
+  throw Object.assign(new Error(deletedAccountMessage(tr)), {
+    code: deletedAccountErrorCode,
+  })
+}
+
+const findDeletedAccountByLogin = async trimmed => {
+  const field = trimmed.includes('@') ? 'contactEmail' : 'phoneNumber'
+  const snap = await getDocs(query(collection(db, 'deletedUsers'), where(field, '==', trimmed)))
+  if (!snap.empty) return { id: snap.docs[0].id, ...snap.docs[0].data() }
+  return null
 }
 
 // ── Language + Theme picker (also used in Admin) ─────────────
@@ -220,7 +238,11 @@ function LoginForm({ onForgot, tr }) {
   const getLoginTarget = async trimmed => {
     if (trimmed.includes('@')) {
       const snap = await getDocs(query(collection(db, 'users'), where('contactEmail', '==', trimmed)))
-      if (snap.empty) throw new Error(tr.wrongCredentials)
+      if (snap.empty) {
+        const deletedAccount = await findDeletedAccountByLogin(trimmed)
+        if (deletedAccount) throwDeletedAccountError(tr)
+        throw new Error(tr.wrongCredentials)
+      }
       const userDoc = snap.docs[0]
       const userData = userDoc.data()
       return {
@@ -232,6 +254,8 @@ function LoginForm({ onForgot, tr }) {
 
     const snap = await getDocs(query(collection(db, 'users'), where('phoneNumber', '==', trimmed)))
     if (snap.empty) {
+      const deletedAccount = await findDeletedAccountByLogin(trimmed)
+      if (deletedAccount) throwDeletedAccountError(tr)
       return {
         uid: null,
         userData: null,
@@ -319,7 +343,11 @@ function LoginForm({ onForgot, tr }) {
       await signInWithEmailAndPassword(auth, target.authEmail, pass)
     } catch (e) {
       await signOut(secondaryAuth).catch(() => {})
-      setError(e?.message === tr.noEmailOnFile ? tr.noEmailOnFile : tr.wrongCredentials)
+      setError(e?.code === deletedAccountErrorCode
+        ? e.message
+        : e?.message === tr.noEmailOnFile
+          ? tr.noEmailOnFile
+          : tr.wrongCredentials)
     } finally {
       setLoading(false)
     }
@@ -739,11 +767,19 @@ function ForgotFlow({ tr, onBack }) {
       let userRow, email
       if (trimmed.includes('@')) {
         const snap = await getDocs(query(collection(db, 'users'), where('contactEmail', '==', trimmed)))
-        if (snap.empty) throw new Error(tr.wrongCredentials)
+        if (snap.empty) {
+          const deletedAccount = await findDeletedAccountByLogin(trimmed)
+          if (deletedAccount) throwDeletedAccountError(tr)
+          throw new Error(tr.wrongCredentials)
+        }
         userRow = { id: snap.docs[0].id, ...snap.docs[0].data() }; email = trimmed
       } else {
         const snap = await getDocs(query(collection(db, 'users'), where('phoneNumber', '==', trimmed)))
-        if (snap.empty) throw new Error(tr.wrongCredentials)
+        if (snap.empty) {
+          const deletedAccount = await findDeletedAccountByLogin(trimmed)
+          if (deletedAccount) throwDeletedAccountError(tr)
+          throw new Error(tr.wrongCredentials)
+        }
         userRow = { id: snap.docs[0].id, ...snap.docs[0].data() }
         if (!userRow.contactEmail) throw new Error(tr.noEmailOnFile)
         email = userRow.contactEmail
@@ -752,7 +788,7 @@ function ForgotFlow({ tr, onBack }) {
       await storeCode(codeKey(email), code, 60_000, { uid: userRow.id, phoneNumber: userRow.phoneNumber, email })
       await sendEmailCode(email, code, 1, userRow.language || 'en')
       setFoundUser(userRow); setFoundEmail(email); setStep(2)
-    } catch (e) { setError(getErrorMessage(e)) }
+    } catch (e) { setError(e?.code === deletedAccountErrorCode ? e.message : getErrorMessage(e)) }
     finally { setLoading(false) }
   }
 

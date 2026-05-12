@@ -402,6 +402,7 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
 }
 .admin-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   background: var(--bg-4);
   padding: 4px;
@@ -2941,9 +2942,12 @@ body {
   padding-top: 16px;
   border-top: 1px solid var(--border);
   display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
   justify-content: flex-end;
 }
 .settings-logout-btn,
+.settings-delete-account-btn,
 .settings-confirm-logout-btn {
   width: auto;
 }

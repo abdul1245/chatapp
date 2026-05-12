@@ -15,14 +15,18 @@ import { buildBirthday, buildDisplayName, formatBirthday, parseBirthday } from '
 import PasswordInput from './PasswordInput'
 import { getDeviceId } from '../deviceSession'
 import { maskEmail } from '../privacy'
+import { archiveAndDeleteUserAccount } from '../accountDeletion'
 
 const genCode = () => String(Math.floor(10000 + Math.random() * 90000))
 const codeKey = email => email.replace(/\./g, ',').replace(/@/g, '--at--') + '_s'
 const passwordCodeKey = email => `${codeKey(email)}_pw`
 const changeEmailCodeKey = email => `${codeKey(email)}_change_email`
 const deviceLogoutCodeKey = (uid, deviceId) => `device_logout_${uid}_${deviceId}`
+const deleteAccountCodeKey = uid => `delete_account_${uid}`
 const PASSWORD_MASK = '********'
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const isInvalidCredentialError = err =>
+  err?.code === 'auth/invalid-credential' || err?.code === 'auth/wrong-password'
 const sendAccountEmailQuietly = (...args) =>
   args[0]
     ? sendAccountEmail(...args).catch(err => console.warn('Account email failed:', err))
@@ -47,7 +51,7 @@ async function getProfile(uid) {
   return snap.exists() ? snap.data() : null
 }
 
-export default function Settings({ user, onClose, onLogout }) {
+export default function Settings({ user, onClose, onLogout, onAccountDeleted }) {
   const { lang, setLang, theme, setTheme, themeColor, setThemeColor, themeColors, tr, languages } = useAppContext()
   const [tab, setTab] = useState('information')
   const [infoMode, setInfoMode] = useState(null)
@@ -108,6 +112,7 @@ export default function Settings({ user, onClose, onLogout }) {
             onModeChange={setInfoMode}
             onUpdated={refreshProfile}
             onLogout={onLogout}
+            onAccountDeleted={onAccountDeleted}
           />
         )}
 
@@ -168,7 +173,7 @@ export default function Settings({ user, onClose, onLogout }) {
   )
 }
 
-function InformationSettings({ user, profile, tr, mode, onModeChange, onUpdated, onLogout }) {
+function InformationSettings({ user, profile, tr, mode, onModeChange, onUpdated, onLogout, onAccountDeleted }) {
   const fullName = buildDisplayName(profile) || profile?.phoneNumber || '-'
   const text = (key, values = {}) =>
     Object.entries(values).reduce((out, [name, value]) => out.replace(`{${name}}`, value), tr[key] || '')
@@ -233,6 +238,9 @@ function InformationSettings({ user, profile, tr, mode, onModeChange, onUpdated,
         <div className="settings-account-actions">
           <button className="btn-danger settings-logout-btn" onClick={() => setConfirmLogout(true)}>
             {tr.logout}
+          </button>
+          <button className="btn-danger settings-delete-account-btn" onClick={() => onModeChange('deleteAccount')}>
+            {tr.deleteAccount}
           </button>
         </div>
       </div>
@@ -300,6 +308,17 @@ function InformationSettings({ user, profile, tr, mode, onModeChange, onUpdated,
           tr={tr}
           onBack={() => onModeChange(null)}
           onUpdated={onUpdated}
+        />
+      )}
+
+      {mode === 'deleteAccount' && (
+        <DeleteAccountFlow
+          user={user}
+          profile={profile}
+          tr={tr}
+          text={text}
+          onBack={() => onModeChange(null)}
+          onAccountDeleted={onAccountDeleted}
         />
       )}
 
@@ -553,6 +572,166 @@ function PasswordInfoRow({ password, tr, onShowPassword, onChangePassword }) {
         <button className="link-btn" onClick={onShowPassword}>{tr.showPassword}</button>
       </div>
     </div>
+  )
+}
+
+function DeleteAccountFlow({ user, profile, tr, text, onBack, onAccountDeleted }) {
+  const [step, setStep] = useState('password')
+  const [password, setPassword] = useState('')
+  const [code, setCode] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const { left, reset, fmt } = useCountdown(60)
+  const email = profile?.contactEmail || ''
+
+  const sendDeleteCode = async () => {
+    const nextCode = genCode()
+    await setDoc(doc(db, 'verificationCodes', deleteAccountCodeKey(user.uid)), {
+      code: nextCode,
+      expiresAt: new Date(Date.now() + 60_000),
+      uid: user.uid,
+      email,
+      purpose: 'delete-account',
+    })
+    await sendEmailCode(email, nextCode, 1, profile?.language || 'en')
+    reset(60)
+    setStep('code')
+  }
+
+  const verifyPassword = async e => {
+    e.preventDefault()
+    setLoading(true)
+    setError('')
+    try {
+      if (!email) throw new Error(tr.noEmailOnFile)
+      const authEmail = profile?.authEmail || `${profile?.phoneNumber || user.uid}@chatapp.local`
+      const credential = EmailAuthProvider.credential(authEmail, password)
+      await reauthenticateWithCredential(auth.currentUser, credential)
+      await sendDeleteCode()
+    } catch (err) {
+      setError(isInvalidCredentialError(err) ? tr.wrongPassword : getErrorMessage(err))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const verifyCode = async e => {
+    e.preventDefault()
+    setLoading(true)
+    setError('')
+    try {
+      const codeDoc = doc(db, 'verificationCodes', deleteAccountCodeKey(user.uid))
+      const snap = await getDoc(codeDoc)
+      if (!snap.exists()) throw new Error(tr.codeNotFound)
+      const data = snap.data()
+      const exp = data.expiresAt?.toMillis?.() ?? new Date(data.expiresAt).getTime()
+      if (Date.now() > exp) throw new Error(tr.codeExpired)
+      if (data.code !== code.trim()) throw new Error(tr.wrongCode)
+      setStep('final')
+    } catch (err) {
+      setError(getErrorMessage(err))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const confirmDelete = async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const result = await archiveAndDeleteUserAccount(db, user.uid, {
+        deletedBy: 'self',
+        missingUserMessage: tr.unknownUser,
+      })
+      await deleteDoc(doc(db, 'verificationCodes', deleteAccountCodeKey(user.uid))).catch(() => {})
+      await sendAccountEmailQuietly(result.profile.contactEmail, 'accountDeleted', result.profile.language || 'en', {
+        phoneNumber: result.profile.phoneNumber || user.uid,
+        deletedAt: result.deletedAtText,
+      })
+      await onAccountDeleted?.()
+    } catch (err) {
+      setError(getErrorMessage(err))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <SettingsVerificationModal
+      title={tr.deleteAccount}
+      description={
+        step === 'password'
+          ? tr.deleteAccountPasswordHint
+          : step === 'code'
+            ? text('enterCodeSentTo', { email: maskEmail(email) })
+            : tr.deleteAccountFinalHint
+      }
+      tr={tr}
+      onClose={onBack}
+    >
+      {step === 'password' && (
+        <form className="settings-stack" onSubmit={verifyPassword}>
+          <div className="field">
+            <label>{tr.password}</label>
+            <PasswordInput
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              showLabel={tr.showPassword}
+              hideLabel={tr.hidePassword}
+              required
+              autoFocus
+            />
+          </div>
+          {error && <div className="error-banner">{error}</div>}
+          <button type="submit" className="btn-danger" disabled={loading || !password}>
+            {loading ? tr.processing : tr.continueBtn}
+          </button>
+        </form>
+      )}
+
+      {step === 'code' && (
+        <form className="settings-stack" onSubmit={verifyCode}>
+          <input
+            type="text"
+            inputMode="numeric"
+            maxLength={5}
+            value={code}
+            onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 5))}
+            placeholder={tr.codePlaceholder}
+            autoFocus
+          />
+          {left > 0 ? (
+            <p className="code-timer">{tr.timeLeft}: <strong>{fmt}</strong></p>
+          ) : (
+            <div className="error-banner">{tr.codeExpired}</div>
+          )}
+          {error && <div className="error-banner">{error}</div>}
+          <div className="settings-inline-actions settings-code-actions">
+            <button type="submit" className="btn-danger" disabled={loading || left === 0 || code.length < 5}>
+              {loading ? tr.processing : tr.continueBtn}
+            </button>
+            <button type="button" className="btn-secondary" onClick={sendDeleteCode} disabled={loading}>
+              {tr.resendCode}
+            </button>
+          </div>
+        </form>
+      )}
+
+      {step === 'final' && (
+        <div className="settings-stack">
+          <div className="modal-warning">{tr.deleteAccountFinalConfirm}</div>
+          {error && <div className="error-banner">{error}</div>}
+          <div className="settings-inline-actions settings-code-actions">
+            <button type="button" className="btn-secondary" onClick={onBack} disabled={loading}>
+              {tr.cancel}
+            </button>
+            <button type="button" className="btn-danger" onClick={confirmDelete} disabled={loading}>
+              {loading ? tr.processing : tr.deleteAccountConfirm}
+            </button>
+          </div>
+        </div>
+      )}
+    </SettingsVerificationModal>
   )
 }
 
