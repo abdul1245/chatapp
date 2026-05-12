@@ -10,7 +10,7 @@ import {
   collection, query, where, serverTimestamp, updateDoc,
 } from 'firebase/firestore'
 import { auth, secondaryAuth, db, secondaryDb } from '../firebase'
-import { sendAccountEmail, sendEmailCode, getErrorMessage } from '../email'
+import { sendAccountEmail, sendEmailCode, getErrorMessage, getMissingEmailConfig, isEmailConfigured } from '../email'
 import { GtyLogo } from '../App'
 import { useAppContext } from '../context/AppContext'
 import { buildBirthday } from '../profile'
@@ -133,7 +133,7 @@ function useCountdown(seconds) {
 }
 
 // ── Reusable code step ───────────────────────────────────────
-function CodeStep({ email, expirySec, onVerify, onResend, onChangeEmail, tr, submitLabel }) {
+function CodeStep({ email, expirySec, onVerify, onResend, onChangeEmail, tr, submitLabel, localCode }) {
   const [code, setCode]   = useState('')
   const { left, reset, fmt } = useCountdown(expirySec)
   const [loading, setLoading]   = useState(false)
@@ -186,6 +186,11 @@ function CodeStep({ email, expirySec, onVerify, onResend, onChangeEmail, tr, sub
       }
 
       {error && <div className="error-banner">{error}</div>}
+      {localCode && (
+        <div className="warning-banner">
+          {tr.localVerificationCode || 'Email is not configured locally. Use this verification code:'} <strong>{localCode}</strong>
+        </div>
+      )}
 
       <button className="btn-primary" onClick={submit}
         disabled={loading || code.length < 5 || left <= 0}>
@@ -430,6 +435,8 @@ function RegisterFlow({ tr }) {
   const [birthYear, setBirthYear] = useState('')
   const [sending, setSending]     = useState(false)
   const [error, setError]         = useState('')
+  const [localVerificationCode, setLocalVerificationCode] = useState('')
+  const canUseLocalVerificationCode = import.meta.env.DEV && !isEmailConfigured()
 
   const validateProfile = () => {
     const trimmedName = name.trim()
@@ -495,7 +502,13 @@ function RegisterFlow({ tr }) {
         lastName: lastName.trim(),
         birthday: buildBirthday(birthDay, birthMonth, birthYear),
       })
-      await sendEmailCode(email.trim(), code, 2, pendingLang)
+      if (canUseLocalVerificationCode) {
+        console.warn(`EmailJS is not configured. Missing: ${getMissingEmailConfig().join(', ')}`)
+        setLocalVerificationCode(code)
+      } else {
+        await sendEmailCode(email.trim(), code, 2, pendingLang)
+        setLocalVerificationCode('')
+      }
       setLang(pendingLang)
       setStep(4)
     } catch (e) {
@@ -566,7 +579,13 @@ function RegisterFlow({ tr }) {
       lastName: lastName.trim(),
       birthday,
     })
+    if (canUseLocalVerificationCode) {
+      console.warn(`EmailJS is not configured. Missing: ${getMissingEmailConfig().join(', ')}`)
+      setLocalVerificationCode(code)
+      return
+    }
     await sendEmailCode(email.trim(), code, 2, pendingLang)
+    setLocalVerificationCode('')
   }
 
   if (step === 1) return (
@@ -695,7 +714,8 @@ function RegisterFlow({ tr }) {
   return (
     <CodeStep email={email} expirySec={120}
       onVerify={verify} onResend={resend}
-      onChangeEmail={() => setStep(2)} tr={tr} />
+      onChangeEmail={() => setStep(2)} tr={tr}
+      localCode={localVerificationCode} />
   )
 }
 

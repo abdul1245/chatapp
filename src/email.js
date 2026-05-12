@@ -159,6 +159,9 @@ const missingEmailConfig = () =>
     .filter(([, value]) => !value)
     .map(([key]) => emailConfigLabels[key] || key)
 
+export const getMissingEmailConfig = missingEmailConfig
+export const isEmailConfigured = () => missingEmailConfig().length === 0
+
 export const getErrorMessage = error => {
   if (!error) return 'Unknown error.'
   if (typeof error === 'string') return error
